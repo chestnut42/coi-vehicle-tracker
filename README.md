@@ -1,24 +1,46 @@
 # coi-vehicle-tracker
 
 A [Captain of Industry](https://captain-of-industry.com) mod that adds a **Vehicle Route Stats**
-window: a per-resource breakdown of total **vehicle-hours**, not just quantity moved and route count.
+window: a per-resource breakdown of the **fuel, maintenance and distance** your truck fleet spends
+hauling each resource, not just quantity moved and route count.
 
 ## Why
 
 The vanilla vehicle monitor shows quantity moved and route count per resource. A resource hauled
 in bulk over a short distance can look identical in "importance" to one hauled in small amounts
-over a long haul, even though the second one is quietly eating far more truck-time (and therefore
-fuel and maintenance). Vehicle-hours makes that cost visible.
+over a long haul, even though the second one is quietly eating far more fuel and maintenance.
+This makes that cost visible, and directly in the units you pay it in.
 
 ## What it does
 
-- Tracks every truck's cargo each simulation tick and accumulates **vehicle-hours per resource**
-  (total simulated time trucks spent carrying that resource).
+- Each simulation tick, attributes every truck's **fuel burn**, **maintenance drain** and
+  **distance driven** to whatever it is currently carrying. A mixed load splits the tick's cost
+  between its products in proportion to how much of the load each one occupies.
 - Also tracks delivery count and total quantity delivered per resource, computed from cargo
   transitions rather than duplicating whatever internal counters the vanilla monitor uses.
-- Adds a window (default shortcut `F7`) listing resources sorted by vehicle-hours, descending.
-- Stats are session-only (reset on load) and self-calibrate the tick-to-hour conversion from the
-  observed in-game day length, so they don't depend on a hardcoded tick rate.
+- Adds a window (default shortcut `F7`) showing one compact card per resource in a 3-column grid,
+  sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months.
+- Stats are session-only (reset on load) and bucketed by calendar month via `Calendar.NewMonth`.
+
+### Why fuel and not vehicle-hours
+
+Time spent carrying is a bad proxy for cost: a loaded truck parked overnight would score the same
+as one driving all night. Fuel and maintenance are read from the game's own model instead:
+
+- Fuel comes from `IEntityWithFuelTank.GetCurrentFuelUsagePer60()`, divided by
+  `Duration.OneMinute.Ticks`, and is only accrued when `IsEngineOn` — matching the engine-on check
+  in `Vehicle.ConsumeFuelPerUpdate`.
+- Maintenance is `MaintenanceCosts.MaintenancePerMonth` prorated over `Calendar.TICKS_PER_MONTH`,
+  accrued only when the vehicle is not `IsIdleForMaintenance`.
+
+Note that fuel burn is **not** proportional to speed. `VehicleFuelConsumption` is a three-state
+enum — `None`, `Idle`, `Full` — chosen by the vehicle's current job, so a working truck burns a
+flat rate regardless of how fast it happens to be moving. Distance is reported separately, from
+the `LifetimeDistanceTraveled` odometer, because it is still the best measure of route length.
+
+Known limitation: cost is only attributed while a truck is loaded, so empty return legs are not
+charged to anything. Absolute numbers are therefore an undercount of a full round trip, though
+resources remain comparable against each other.
 
 Scope: trucks only for v1. Ships and trains expose cargo differently in the game's API and are
 candidates for a follow-up.
@@ -30,7 +52,7 @@ VehicleRouteStats/
   manifest.json              mod metadata
   VehicleRouteStats.csproj    references $(COI_ROOT) game assemblies
   VehicleRouteStatsMod.cs      IMod entry point, wires the tracker to sim/calendar events
-  HaulStatsTracker.cs          per-resource vehicle-hours / delivery tracking
+  HaulStatsTracker.cs          per-resource fuel / maintenance / distance, bucketed by month
   Shortcuts.cs                 F7 keybinding
   Ui/HaulStatsWindow.cs        the stats window
 ```
