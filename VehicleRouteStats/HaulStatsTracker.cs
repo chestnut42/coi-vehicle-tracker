@@ -48,16 +48,24 @@ public sealed class HaulStatsTracker
     }
 
     private readonly IEntitiesManager m_entities;
+    private readonly ISimLoopEvents m_simLoopEvents;
     private readonly Lyst<ProductQuantity> m_cargoBuffer = new(4);
     private readonly Dict<int, TruckState> m_truckStates = new();
     private readonly Dict<ProductProto, ProductHaulStats>[] m_months =
         new Dict<ProductProto, ProductHaulStats>[MonthsTracked];
 
     private int m_monthIndex;
+    private int m_lastStep = -1;
 
-    public HaulStatsTracker(IEntitiesManager entities)
+    /// <summary>Fuel and maintenance products observed on the fleet, for the UI to draw icons with.</summary>
+    public ProductProto FuelProduct { get; private set; }
+
+    public ProductProto MaintenanceProduct { get; private set; }
+
+    public HaulStatsTracker(IEntitiesManager entities, ISimLoopEvents simLoopEvents)
     {
         m_entities = entities;
+        m_simLoopEvents = simLoopEvents;
         for (int i = 0; i < m_months.Length; i++)
         {
             m_months[i] = new Dict<ProductProto, ProductHaulStats>();
@@ -66,6 +74,16 @@ public sealed class HaulStatsTracker
 
     public void OnSimTick()
     {
+        // UpdateAfterCmdProc still fires while the game is paused, and fuel/maintenance are read as
+        // rates rather than deltas, so they would keep accruing. Only bill a step the sim actually ran.
+        int step = m_simLoopEvents.CurrentStep.Value;
+        if (m_simLoopEvents.IsSimPaused || step == m_lastStep)
+        {
+            return;
+        }
+
+        m_lastStep = step;
+
         foreach (Truck truck in m_entities.GetAllEntitiesOfType<Truck>())
         {
             if (!truck.IsDestroyed)
@@ -140,9 +158,16 @@ public sealed class HaulStatsTracker
             ? truck.GetCurrentFuelUsagePer60().Value.ToDouble() / Duration.OneMinute.Ticks
             : 0;
 
+        MaintenanceCosts costs = truck.Maintenance.Costs;
         double maintenance = ((IMaintainedEntity)truck).IsIdleForMaintenance
             ? 0
-            : truck.Maintenance.Costs.MaintenancePerMonth.Value.ToDouble() / Calendar.TICKS_PER_MONTH;
+            : costs.MaintenancePerMonth.Value.ToDouble() / Calendar.TICKS_PER_MONTH;
+
+        MaintenanceProduct ??= costs.Product;
+        if (FuelProduct == null && truck.FuelTank.HasValue)
+        {
+            FuelProduct = truck.FuelTank.Value.Proto.Product;
+        }
 
         Lyst<ProductQuantity> cargo = m_cargoBuffer;
         cargo.Clear();
