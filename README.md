@@ -19,7 +19,12 @@ This makes that cost visible, and directly in the units you pay it in.
 - Also tracks delivery count and total quantity delivered per resource, computed from cargo
   transitions rather than duplicating whatever internal counters the vanilla monitor uses.
 - Adds a window (default shortcut `F7`) showing one compact card per resource in a 4-column grid,
-  sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months.
+  sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months and
+  independent toggles for general / mining / refuelling hauls. The toggles use the same categories,
+  localized labels and tooltips as the vanilla truck stats tab: a truck hauling loose product for a
+  `MineTower`, or anything for a `TreeHarvester`, counts as mining; a truck running a
+  `RefuelOtherVehicleJob` counts as refuelling; everything else is general. That split is taken from
+  `VehicleJobStatsManager.RecordJobStatsFor`.
   Each card shows fuel and maintenance against the actual product icons; distance, delivery count
   and quantity delivered are still tracked and sit in the card's tooltip.
 - Nothing accrues while the game is paused: sampling is skipped unless the simulation step has

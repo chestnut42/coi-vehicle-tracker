@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Mafi;
+using Mafi.Core;
 using Mafi.Core.Products;
 using Mafi.Localization;
 using Mafi.Unity.InputControl;
@@ -21,8 +23,12 @@ public sealed class HaulStatsWindow : Window
     private const int CardGap = 6;
 
     private readonly Grid m_grid;
+    private readonly Row m_totals;
     private HaulStatsTracker m_tracker;
     private int m_months = 12;
+    private bool m_includeGeneral = true;
+    private bool m_includeMining = true;
+    private bool m_includeRefueling = true;
 
     public HaulStatsWindow() : base(new LocStrFormatted("Vehicle Route Stats"), true)
     {
@@ -45,9 +51,30 @@ public sealed class HaulStatsWindow : Window
             Refresh();
         });
 
+        // Vanilla stacks the three category toggles in a column; a row of them overflows the window.
+        var categories = new Column(1.pt());
+        categories.Add(CategoryToggle(
+            Tr.TrucksStats__OptionGeneral,
+            Tr.TrucksStats__OptionGeneralTooltip,
+            () => m_includeGeneral,
+            isOn => m_includeGeneral = isOn));
+        categories.Add(CategoryToggle(
+            Tr.TrucksStats__OptionMining,
+            Tr.TrucksStats__OptionMiningTooltip,
+            () => m_includeMining,
+            isOn => m_includeMining = isOn));
+        categories.Add(CategoryToggle(
+            Tr.TrucksStats__OptionRefueling,
+            Tr.TrucksStats__OptionRefuelingTooltip,
+            () => m_includeRefueling,
+            isOn => m_includeRefueling = isOn));
+
         var toolbar = new Row(10.px()).AlignItemsCenter();
         toolbar.Add(rangeDropdown);
+        toolbar.Add(categories);
         toolbar.Add(resetButton);
+
+        m_totals = new Row(4.px()).AlignItemsCenter();
 
         m_grid = new Grid(GridColumns, CardGap.px(), CardGap.px());
 
@@ -57,6 +84,7 @@ public sealed class HaulStatsWindow : Window
 
         var body = new Column(6.px());
         body.Add(toolbar);
+        body.Add(m_totals);
         body.Add(scroll);
         Body.Add(body);
 
@@ -64,6 +92,18 @@ public sealed class HaulStatsWindow : Window
     }
 
     public void SetTracker(HaulStatsTracker tracker) => m_tracker = tracker;
+
+    private Toggle CategoryToggle(LocStr label, LocStr tooltip, Func<bool> get, Action<bool> set) =>
+        new Toggle(true)
+            .Label(label)
+            .Tooltip(tooltip)
+            .Value(get())
+            .ObserveValue(get)
+            .OnValueChanged(isOn =>
+            {
+                set(isOn);
+                Refresh();
+            });
 
     private static LocStrFormatted RangeLabel(int months) =>
         (months == 1 ? "Last 1 month" : $"Last {months} months").AsLoc();
@@ -76,14 +116,30 @@ public sealed class HaulStatsWindow : Window
         }
 
         m_grid.Clear();
+        m_totals.Clear();
 
         IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> ordered =
-            m_tracker.Snapshot(m_months).OrderByDescending(e => e.Value.Fuel);
+            m_tracker.Snapshot(m_months, m_includeGeneral, m_includeMining, m_includeRefueling)
+                .OrderByDescending(e => e.Value.Fuel);
+
+        double totalFuel = 0;
+        double totalMaintenance = 0;
 
         foreach (var entry in ordered)
         {
+            // Summed here rather than from the tracker so the header can only ever show what is drawn.
+            totalFuel += entry.Value.Fuel;
+            totalMaintenance += entry.Value.Maintenance;
             m_grid.Add(BuildCard(entry.Key, entry.Value));
         }
+
+        m_totals.Add(new Label("Total".AsLoc()).FontBold());
+        m_totals.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(totalFuel)));
+        m_totals.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(totalMaintenance)));
+        m_totals.Tooltip(
+            ($"Total across the resources shown\n" +
+             $"Fuel: {totalFuel:F1}\n" +
+             $"Maintenance: {totalMaintenance:F1}").ToDoLoc());
     }
 
     private UiComponent BuildCard(ProductProto product, ProductHaulStats stats)
