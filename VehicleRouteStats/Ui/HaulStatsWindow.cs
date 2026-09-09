@@ -28,6 +28,7 @@ public sealed class HaulStatsWindow : Window
     {
         WindowSize((GridColumns * (CardWidth + CardGap) + 30).px(), Px.Auto);
         MakeMovable();
+        EnablePinning();
 
         var rangeDropdown = DropdownFor.LocStr();
         rangeDropdown.SetOptions(RangeMonths.Select(RangeLabel).ToArray());
