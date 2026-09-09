@@ -25,6 +25,23 @@
     <OutputPath>bin\Release\</OutputPath>
   </PropertyGroup>
 
+  <!-- COI_ROOT overrides this; the default covers a stock Steam install. -->
+  <PropertyGroup Condition="'$(COI_ROOT)' == ''">
+    <COI_ROOT>$([System.Environment]::GetFolderPath(SpecialFolder.ProgramFilesX86))\Steam\steamapps\common\Captain of Industry</COI_ROOT>
+  </PropertyGroup>
+
+  <!-- Lets `dotnet build` target net48 without the Visual Studio targeting pack installed. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Game assemblies live in the game process already; never copy them to the output. -->
+  <ItemDefinitionGroup>
+    <Reference>
+      <Private>false</Private>
+    </Reference>
+  </ItemDefinitionGroup>
+
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="Mafi">
@@ -57,7 +74,7 @@
   </ItemGroup>
 
   <Target Name="RequireCoiRoot" BeforeTargets="ResolveAssemblyReferences">
-    <Error Condition="'$(COI_ROOT)' == ''" Text="Environment variable 'COI_ROOT' is not set. Point it at your Captain of Industry install directory." />
+    <Error Condition="!Exists('$(COI_ROOT)\Captain of Industry_Data\Managed\Mafi.Core.dll')" Text="Captain of Industry assemblies not found under '$(COI_ROOT)'. Set the COI_ROOT environment variable to your game install directory." />
   </Target>
 
   <Target Name="DeployToModsFolder" AfterTargets="PostBuildEvent" Condition=" '$(DeployToModsFolder)' == 'true' AND '$(ProjectDir)' != '*Undefined*' ">

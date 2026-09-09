@@ -37,10 +37,13 @@ VehicleRouteStats/
 
 ## Building
 
-1. Own Captain of Industry on Steam, .NET Framework 4.8 installed.
-2. Set an environment variable `COI_ROOT` pointing at the game's install directory.
-3. Build `VehicleRouteStats.csproj` in Release. It deploys to
-   `%APPDATA%/Captain of Industry/Mods/VehicleRouteStats` automatically.
+1. Own Captain of Industry on Steam, and install the [.NET SDK](https://dotnet.microsoft.com/download)
+   (8.0 or newer). Visual Studio is optional — the project pulls in the .NET Framework 4.8
+   reference assemblies from NuGet, so the SDK alone can build it.
+2. A stock Steam install is found automatically. For a non-standard location, set a `COI_ROOT`
+   environment variable pointing at the game's install directory.
+3. `dotnet build VehicleRouteStats\VehicleRouteStats.csproj -c Release`. It deploys to
+   `%APPDATA%\Captain of Industry\Mods\VehicleRouteStats` automatically.
 4. Launch the game, enable the mod for a new (or existing) game, press `F7` in-game.
 
 ## Notes on how this was built
@@ -53,7 +56,11 @@ framework, `[GlobalDependency]` DI registration, etc.) were cross-checked agains
 independent open-source community mods rather than guessed from scratch. The code itself is
 original, not copied.
 
-This was written without access to the actual game or its assemblies, so it has not been
-compiled or run. If a member name has drifted in your installed game version, the build error
-will point at exactly which one — check `%APPDATA%/Captain of Industry/Logs` if it loads but
-misbehaves.
+The first draft was written without access to the actual game assemblies, and three namespace
+guesses were wrong: `IConfig` is in `Mafi.Core.Game`, `ProductQuantity` in `Mafi.Core`, and
+`Window`/`WindowController<>` live in `Mafi.Unity.UiToolkit.Library` and `Mafi.Unity.InputControl`
+respectively (not a single `UiToolkit` namespace). `WindowController<T>` also requires a
+`CreateWindow()` override. Those are fixed and it now compiles clean.
+
+It has been compiled but not yet run in-game. If it loads but misbehaves, check
+`%APPDATA%/Captain of Industry/Logs`.

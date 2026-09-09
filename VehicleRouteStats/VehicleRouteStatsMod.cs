@@ -2,6 +2,7 @@ using Mafi;
 using Mafi.Collections;
 using Mafi.Core;
 using Mafi.Core.Entities;
+using Mafi.Core.Game;
 using Mafi.Core.Mods;
 using Mafi.Core.Prototypes;
 using Mafi.Core.Simulation;
