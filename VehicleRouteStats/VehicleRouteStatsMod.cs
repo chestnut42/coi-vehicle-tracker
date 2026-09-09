@@ -53,7 +53,7 @@ public sealed class VehicleRouteStatsMod : IMod
         m_simLoopEvents = resolver.Resolve<ISimLoopEvents>();
         m_calendar = resolver.Resolve<Calendar>();
 
-        m_tracker = new HaulStatsTracker(m_entities);
+        m_tracker = new HaulStatsTracker(m_entities, m_simLoopEvents);
         m_simLoopEvents.UpdateAfterCmdProc.AddNonSaveable(this, OnSimUpdate);
         m_calendar.NewMonth.AddNonSaveable(this, m_tracker.OnNewMonth);
         m_entities.EntityRemoved.AddNonSaveable(this, m_tracker.OnEntityRemoved);

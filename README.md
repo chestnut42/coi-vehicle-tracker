@@ -18,8 +18,12 @@ This makes that cost visible, and directly in the units you pay it in.
   between its products in proportion to how much of the load each one occupies.
 - Also tracks delivery count and total quantity delivered per resource, computed from cargo
   transitions rather than duplicating whatever internal counters the vanilla monitor uses.
-- Adds a window (default shortcut `F7`) showing one compact card per resource in a 3-column grid,
+- Adds a window (default shortcut `F7`) showing one compact card per resource in a 4-column grid,
   sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months.
+  Each card shows fuel and maintenance against the actual product icons; distance, delivery count
+  and quantity delivered are still tracked and sit in the card's tooltip.
+- Nothing accrues while the game is paused: sampling is skipped unless the simulation step has
+  actually advanced (`ISimLoopEvents.CurrentStep`) and the sim is not paused.
 - Stats are session-only (reset on load) and bucketed by calendar month via `Calendar.NewMonth`.
 
 ### Why fuel and not vehicle-hours

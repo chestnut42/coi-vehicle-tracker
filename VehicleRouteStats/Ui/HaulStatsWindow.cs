@@ -16,8 +16,8 @@ public sealed class HaulStatsWindow : Window
 {
     private static readonly int[] RangeMonths = { 1, 3, 6, 12 };
 
-    private const int GridColumns = 3;
-    private const int CardWidth = 220;
+    private const int GridColumns = 4;
+    private const int CardWidth = 150;
     private const int CardGap = 6;
 
     private readonly Grid m_grid;
@@ -26,7 +26,7 @@ public sealed class HaulStatsWindow : Window
 
     public HaulStatsWindow() : base(new LocStrFormatted("Vehicle Route Stats"), true)
     {
-        WindowSize((GridColumns * (CardWidth + CardGap) + 40).px(), Px.Auto);
+        WindowSize((GridColumns * (CardWidth + CardGap) + 30).px(), Px.Auto);
         MakeMovable();
 
         var rangeDropdown = DropdownFor.LocStr();
@@ -85,38 +85,59 @@ public sealed class HaulStatsWindow : Window
         }
     }
 
-    private static UiComponent BuildCard(ProductProto product, ProductHaulStats stats)
+    private UiComponent BuildCard(ProductProto product, ProductHaulStats stats)
     {
-        var title = new Row(6.px()).AlignItemsCenter();
-        title.Add(new Icon(product).Size(ProductQuantityUi.ICON_HEIGHT).Tooltip(product.Strings.Name));
-        title.Add(new Label(product.Strings.Name).FontBold());
+        var title = new Row(4.px()).AlignItemsCenter();
+        title.Add(new Icon(product).Small().Tooltip(product.Strings.Name));
+        title.Add(new Label(product.Strings.Name)
+            .FontSize(11)
+            .TextOverflow(TextOverflow.Ellipsis));
 
-        var costs = new Row(8.px());
-        costs.Add(Stat("Fuel", stats.Fuel.ToString("F1")));
-        costs.Add(Stat("Maintenance", stats.Maintenance.ToString("F1")));
-
-        var hauling = new Row(8.px());
-        hauling.Add(Stat("Distance", stats.Distance.ToString("F0")));
-        hauling.Add(Stat("Deliveries", stats.Deliveries.ToString()));
-
-        var moved = new Row(8.px());
-        moved.Add(Stat("Delivered", stats.Delivered.ToString("F0")));
+        var costs = new Row(4.px()).AlignItemsCenter();
+        costs.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(stats.Fuel)));
+        costs.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(stats.Maintenance)));
 
         var card = new Panel(true);
         card.Width(CardWidth.px());
         card.Body.Add(title);
         card.Body.Add(costs);
-        card.Body.Add(hauling);
-        card.Body.Add(moved);
+
+        // The card shows rounded figures, so the tooltip carries the exact ones plus what didn't fit.
+        card.Tooltip(
+            ($"{product.Strings.Name}\n" +
+             $"Fuel: {stats.Fuel:F1}\n" +
+             $"Maintenance: {stats.Maintenance:F1}\n" +
+             $"Distance: {stats.Distance:F0}\n" +
+             $"Deliveries: {stats.Deliveries}\n" +
+             $"Delivered: {stats.Delivered:F0}").ToDoLoc());
+
         return card;
     }
 
-    private static UiComponent Stat(string caption, string value)
+    // Tiles don't shrink, so a year's worth of fuel has to stay short or it overflows the card.
+    private static string Compact(double value) =>
+        value >= 1_000_000 ? (value / 1_000_000).ToString("0.#") + "M"
+        : value >= 1_000 ? (value / 1_000).ToString("0.#") + "k"
+        : value.ToString("0.#");
+
+    /// <summary>The vanilla inspector's compact icon-plus-value tile; it sizes to its content.</summary>
+    private static UiComponent Cell(ProductProto icon, string fallbackCaption, string value)
     {
-        var cell = new Column(0.px()).Width(((CardWidth - 24) / 2).px());
-        cell.Add(new Label(caption.AsLoc()).FontSize(10));
-        cell.Add(new Label(value.ToDoLoc()).FontBold());
-        return cell;
+        var tile = new ReadonlyTile(null, "".AsLoc());
+        tile.SmallIcon();
+
+        if (icon != null)
+        {
+            tile.Icon(icon, false);
+            tile.Value(value.ToDoLoc());
+        }
+        else
+        {
+            tile.Value($"{fallbackCaption} {value}".ToDoLoc());
+        }
+
+        tile.SetTextOverflow(TextOverflow.Clip);
+        return tile;
     }
 
     [GlobalDependency(RegistrationMode.AsEverything)]
