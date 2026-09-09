@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Mafi;
 using Mafi.Collections;
+using Mafi.Core;
 using Mafi.Core.Entities;
 using Mafi.Core.Products;
 using Mafi.Core.Vehicles.Trucks;

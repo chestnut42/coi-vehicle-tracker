@@ -1,6 +1,7 @@
 using System.Linq;
 using Mafi;
 using Mafi.Localization;
+using Mafi.Unity.InputControl;
 using Mafi.Unity.Ui.Library;
 using Mafi.Unity.UiToolkit;
 using Mafi.Unity.UiToolkit.Component;
@@ -9,7 +10,6 @@ using VehicleRouteStats;
 
 namespace VehicleRouteStats.Ui;
 
-[GlobalDependency(RegistrationMode.AsEverything)]
 public sealed class HaulStatsWindow : Window
 {
     private readonly Column m_rows;
@@ -75,12 +75,28 @@ public sealed class HaulStatsWindow : Window
     [GlobalDependency(RegistrationMode.AsEverything)]
     public sealed class Controller : WindowController<HaulStatsWindow>
     {
+        private HaulStatsTracker m_tracker;
+
         public Controller(ControllerContext controllerContext) : base(controllerContext)
         {
             controllerContext.UiRoot.AddDependency(this);
             controllerContext.InputManager.RegisterGlobalShortcut(_ => Shortcuts.Instance.ToggleWindow, this);
         }
 
-        public void SetTracker(HaulStatsTracker tracker) => Window.SetTracker(tracker);
+        protected override HaulStatsWindow CreateWindow()
+        {
+            var window = new HaulStatsWindow();
+            window.SetTracker(m_tracker);
+            return window;
+        }
+
+        public void SetTracker(HaulStatsTracker tracker)
+        {
+            m_tracker = tracker;
+            if (HasWindow)
+            {
+                Window.SetTracker(tracker);
+            }
+        }
     }
 }
