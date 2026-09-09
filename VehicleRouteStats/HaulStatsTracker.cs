@@ -2,13 +2,26 @@ using System.Collections.Generic;
 using Mafi;
 using Mafi.Collections;
 using Mafi.Core;
+using Mafi.Core.Buildings.Mine;
 using Mafi.Core.Entities;
 using Mafi.Core.Maintenance;
 using Mafi.Core.Products;
 using Mafi.Core.Simulation;
+using Mafi.Core.Vehicles.Jobs;
+using Mafi.Core.Vehicles.TreeHarvesters;
 using Mafi.Core.Vehicles.Trucks;
 
 namespace VehicleRouteStats;
+
+/// <summary>
+/// Mirrors the split the vanilla truck stats tab uses for its three filter toggles.
+/// </summary>
+public enum HaulCategory
+{
+    General = 0,
+    Mining = 1,
+    Refueling = 2,
+}
 
 public sealed class ProductHaulStats
 {
@@ -40,6 +53,7 @@ public sealed class ProductHaulStats
 public sealed class HaulStatsTracker
 {
     public const int MonthsTracked = 12;
+    private const int CategoryCount = 3;
 
     private sealed class TruckState
     {
@@ -51,8 +65,8 @@ public sealed class HaulStatsTracker
     private readonly ISimLoopEvents m_simLoopEvents;
     private readonly Lyst<ProductQuantity> m_cargoBuffer = new(4);
     private readonly Dict<int, TruckState> m_truckStates = new();
-    private readonly Dict<ProductProto, ProductHaulStats>[] m_months =
-        new Dict<ProductProto, ProductHaulStats>[MonthsTracked];
+    private readonly Dict<ProductProto, ProductHaulStats>[,] m_months =
+        new Dict<ProductProto, ProductHaulStats>[CategoryCount, MonthsTracked];
 
     private int m_monthIndex;
     private int m_lastStep = -1;
@@ -66,9 +80,12 @@ public sealed class HaulStatsTracker
     {
         m_entities = entities;
         m_simLoopEvents = simLoopEvents;
-        for (int i = 0; i < m_months.Length; i++)
+        for (int category = 0; category < CategoryCount; category++)
         {
-            m_months[i] = new Dict<ProductProto, ProductHaulStats>();
+            for (int month = 0; month < MonthsTracked; month++)
+            {
+                m_months[category, month] = new Dict<ProductProto, ProductHaulStats>();
+            }
         }
     }
 
@@ -96,16 +113,19 @@ public sealed class HaulStatsTracker
     public void OnNewMonth()
     {
         m_monthIndex = (m_monthIndex + 1) % MonthsTracked;
-        m_months[m_monthIndex].Clear();
+        for (int category = 0; category < CategoryCount; category++)
+        {
+            m_months[category, m_monthIndex].Clear();
+        }
     }
 
     public void OnEntityRemoved(IEntity entity) => m_truckStates.Remove(entity.Id.Value);
 
     public void Reset()
     {
-        foreach (var month in m_months)
+        foreach (var bucket in m_months)
         {
-            month.Clear();
+            bucket.Clear();
         }
 
         m_truckStates.Clear();
@@ -113,29 +133,75 @@ public sealed class HaulStatsTracker
     }
 
     /// <summary>
-    /// Totals over the last <paramref name="months"/> buckets, most recent (partial) month included.
+    /// Totals over the last <paramref name="months"/> buckets, most recent (partial) month included,
+    /// restricted to the categories whose flag is set.
     /// </summary>
-    public IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> Snapshot(int months)
+    public IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> Snapshot(
+        int months,
+        bool general,
+        bool mining,
+        bool refueling)
     {
         var totals = new Dict<ProductProto, ProductHaulStats>();
         int count = months < MonthsTracked ? months : MonthsTracked;
 
-        for (int i = 0; i < count; i++)
+        for (int category = 0; category < CategoryCount; category++)
         {
-            int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
-            foreach (var entry in m_months[index])
+            bool include = (HaulCategory)category switch
             {
-                if (!totals.TryGetValue(entry.Key, out ProductHaulStats sum))
-                {
-                    sum = new ProductHaulStats();
-                    totals.Add(entry.Key, sum);
-                }
+                HaulCategory.General => general,
+                HaulCategory.Mining => mining,
+                _ => refueling,
+            };
 
-                sum.Add(entry.Value);
+            if (!include)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
+                foreach (var entry in m_months[category, index])
+                {
+                    if (!totals.TryGetValue(entry.Key, out ProductHaulStats sum))
+                    {
+                        sum = new ProductHaulStats();
+                        totals.Add(entry.Key, sum);
+                    }
+
+                    sum.Add(entry.Value);
+                }
             }
         }
 
         return totals;
+    }
+
+    /// <summary>
+    /// Same split as <c>VehicleJobStatsManager.RecordJobStatsFor</c>: a truck hauling loose product
+    /// for a mine tower, or anything for a tree harvester, counts as mining; a truck currently
+    /// running a refuelling job counts as refuelling; everything else is general.
+    /// </summary>
+    private static HaulCategory Classify(Truck truck, ProductProto product)
+    {
+        if (truck.CurrentJob.ValueOrNull is RefuelOtherVehicleJob)
+        {
+            return HaulCategory.Refueling;
+        }
+
+        var assignedTo = truck.AssignedTo.ValueOrNull;
+        if (assignedTo is TreeHarvester)
+        {
+            return HaulCategory.Mining;
+        }
+
+        if (assignedTo is MineTower && product.Type.Matches(LooseProductProto.ProductType))
+        {
+            return HaulCategory.Mining;
+        }
+
+        return HaulCategory.General;
     }
 
     private void SampleTruck(Truck truck)
@@ -179,28 +245,26 @@ public sealed class HaulStatsTracker
             totalQuantity += pq.Quantity.Value;
         }
 
-        Dict<ProductProto, ProductHaulStats> bucket = m_months[m_monthIndex];
-
         if (totalQuantity > 0)
         {
             foreach (ProductQuantity pq in cargo)
             {
                 // A mixed load splits the trip's cost by how much of it each product occupies.
                 double share = pq.Quantity.Value / totalQuantity;
-                ProductHaulStats stats = GetOrAdd(bucket, pq.Product);
+                ProductHaulStats stats = GetOrAdd(BucketFor(truck, pq.Product), pq.Product);
                 stats.Fuel += fuel * share;
                 stats.Maintenance += maintenance * share;
                 stats.Distance += distance * share;
             }
         }
 
-        RecordDeliveries(cargo, state, bucket);
+        RecordDeliveries(truck, cargo, state);
     }
 
-    private void RecordDeliveries(
-        Lyst<ProductQuantity> cargo,
-        TruckState state,
-        Dict<ProductProto, ProductHaulStats> bucket)
+    private Dict<ProductProto, ProductHaulStats> BucketFor(Truck truck, ProductProto product) =>
+        m_months[(int)Classify(truck, product), m_monthIndex];
+
+    private void RecordDeliveries(Truck truck, Lyst<ProductQuantity> cargo, TruckState state)
     {
         List<ProductProto> delivered = null;
         foreach (var entry in state.LastCargo)
@@ -226,7 +290,7 @@ public sealed class HaulStatsTracker
         {
             foreach (ProductProto product in delivered)
             {
-                ProductHaulStats stats = GetOrAdd(bucket, product);
+                ProductHaulStats stats = GetOrAdd(BucketFor(truck, product), product);
                 stats.Deliveries++;
                 stats.Delivered += state.LastCargo[product];
                 state.LastCargo.Remove(product);
