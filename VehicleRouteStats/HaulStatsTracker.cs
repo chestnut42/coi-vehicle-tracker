@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 using Mafi;
 using Mafi.Collections;
 using Mafi.Core;
@@ -6,6 +8,7 @@ using Mafi.Core.Buildings.Mine;
 using Mafi.Core.Entities;
 using Mafi.Core.Maintenance;
 using Mafi.Core.Products;
+using Mafi.Core.Prototypes;
 using Mafi.Core.Simulation;
 using Mafi.Core.Vehicles.Jobs;
 using Mafi.Core.Vehicles.TreeHarvesters;
@@ -54,6 +57,7 @@ public sealed class HaulStatsTracker
 {
     public const int MonthsTracked = 12;
     private const int CategoryCount = 3;
+    private const string StateSchemaVersion = "v1";
 
     private sealed class TruckState
     {
@@ -179,6 +183,94 @@ public sealed class HaulStatsTracker
     }
 
     /// <summary>
+    /// Flattens every bucket to one line per (category, month, product). Months are written as an
+    /// offset back from the current one so the ring's rotation does not have to survive the round
+    /// trip. Numbers are invariant-culture; a decimal comma would otherwise split a record in half.
+    /// </summary>
+    public string SerializeState(int maxLength)
+    {
+        var sb = new StringBuilder();
+        sb.Append(StateSchemaVersion);
+
+        for (int offset = 0; offset < MonthsTracked; offset++)
+        {
+            int index = ((m_monthIndex - offset) % MonthsTracked + MonthsTracked) % MonthsTracked;
+
+            for (int category = 0; category < CategoryCount; category++)
+            {
+                foreach (var entry in m_months[category, index])
+                {
+                    ProductHaulStats s = entry.Value;
+                    int lengthBeforeMonth = sb.Length;
+
+                    sb.Append(';').Append(category).Append(',').Append(offset).Append(',')
+                        .Append(entry.Key.Id.Value).Append(',')
+                        .Append(Num(s.Fuel)).Append(',')
+                        .Append(Num(s.Maintenance)).Append(',')
+                        .Append(Num(s.Distance)).Append(',')
+                        .Append(s.Deliveries.ToString(CultureInfo.InvariantCulture)).Append(',')
+                        .Append(Num(s.Delivered));
+
+                    // Rather than fail the save, drop the oldest months that no longer fit.
+                    if (sb.Length > maxLength)
+                    {
+                        sb.Length = lengthBeforeMonth;
+                        return sb.ToString();
+                    }
+                }
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Restores what <see cref="SerializeState"/> wrote. Anything unparseable is skipped rather than
+    /// thrown, so a blob from an older mod version costs history but never blocks a load.
+    /// </summary>
+    public void RestoreState(string data, ProtosDb protosDb)
+    {
+        Reset();
+
+        if (string.IsNullOrEmpty(data))
+        {
+            return;
+        }
+
+        string[] records = data.Split(';');
+        if (records.Length == 0 || records[0] != StateSchemaVersion)
+        {
+            return;
+        }
+
+        for (int i = 1; i < records.Length; i++)
+        {
+            string[] f = records[i].Split(',');
+            if (f.Length != 8
+                || !int.TryParse(f[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int category)
+                || !int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset)
+                || category < 0 || category >= CategoryCount
+                || offset < 0 || offset >= MonthsTracked
+                || !protosDb.TryGetProto(new Proto.ID(f[2]), out ProductProto product))
+            {
+                continue;
+            }
+
+            ProductHaulStats stats = GetOrAdd(m_months[category, (MonthsTracked - offset) % MonthsTracked], product);
+            stats.Fuel = Parse(f[3]);
+            stats.Maintenance = Parse(f[4]);
+            stats.Distance = Parse(f[5]);
+            stats.Deliveries = (int)Parse(f[6]);
+            stats.Delivered = Parse(f[7]);
+        }
+    }
+
+    private static string Num(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private static double Parse(string value) =>
+        double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : 0;
+
+    /// <summary>
     /// Same split as <c>VehicleJobStatsManager.RecordJobStatsFor</c>: a truck hauling loose product
     /// for a mine tower, or anything for a tree harvester, counts as mining; a truck currently
     /// running a refuelling job counts as refuelling; everything else is general.
@@ -227,7 +319,7 @@ public sealed class HaulStatsTracker
         MaintenanceCosts costs = truck.Maintenance.Costs;
         double maintenance = ((IMaintainedEntity)truck).IsIdleForMaintenance
             ? 0
-            : costs.MaintenancePerMonth.Value.ToDouble() / Calendar.TICKS_PER_MONTH;
+            : costs.MaintenancePerMonth.Value.ToDouble() / Mafi.Core.Simulation.Calendar.TICKS_PER_MONTH;
 
         MaintenanceProduct ??= costs.Product;
         if (FuelProduct == null && truck.FuelTank.HasValue)

@@ -18,7 +18,7 @@ This makes that cost visible, and directly in the units you pay it in.
   between its products in proportion to how much of the load each one occupies.
 - Also tracks delivery count and total quantity delivered per resource, computed from cargo
   transitions rather than duplicating whatever internal counters the vanilla monitor uses.
-- Adds a window (default shortcut `F7`) showing one compact card per resource in a 4-column grid,
+- Adds a window (default shortcut `F8`) showing one compact card per resource in a 4-column grid,
   sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months and
   independent toggles for general / mining / refuelling hauls. The toggles use the same categories,
   localized labels and tooltips as the vanilla truck stats tab: a truck hauling loose product for a
@@ -29,7 +29,27 @@ This makes that cost visible, and directly in the units you pay it in.
   and quantity delivered are still tracked and sit in the card's tooltip.
 - Nothing accrues while the game is paused: sampling is skipped unless the simulation step has
   actually advanced (`ISimLoopEvents.CurrentStep`) and the sim is not paused.
-- Stats are session-only (reset on load) and bucketed by calendar month via `Calendar.NewMonth`.
+- Stats are bucketed by calendar month via `Calendar.NewMonth` and **persist across sessions**.
+
+### How persistence works
+
+The game has no save-data API for mods, but it does serialize each mod's `ModJsonConfig` into the
+save file. So the stats are flattened to a compact string and stored in a `stats_state` config
+parameter declared in `config.json` — written on `ISimLoopEvents.BeforeSave`, read back in
+`Initialize`. This is the same approach several community mods use (see
+[CoI_AutoHelpers](https://github.com/Kayser1444/CoI_AutoHelpers)).
+
+The upshot is that the data is per-save automatically, and travels with a save that is copied or
+renamed, without this mod defining any save format of its own. Some deliberate choices:
+
+- One record per (category, month, product); months are stored as an offset back from the current
+  one, so the ring buffer's rotation does not have to survive the round trip.
+- Numbers are written with `CultureInfo.InvariantCulture` — a locale that formats decimals with a
+  comma would otherwise split a record in half.
+- A schema version prefix; a blob written by a different version is ignored rather than misread.
+- Anything unparseable is skipped, so a bad blob costs history but never blocks loading a save.
+- If the data would exceed the parameter's length limit, the oldest months are dropped instead of
+  failing the save.
 
 ### Why fuel and not vehicle-hours
 
@@ -59,10 +79,11 @@ candidates for a follow-up.
 ```
 VehicleRouteStats/
   manifest.json              mod metadata
+  config.json                declares the stats_state param the save persists
   VehicleRouteStats.csproj    references $(COI_ROOT) game assemblies
   VehicleRouteStatsMod.cs      IMod entry point, wires the tracker to sim/calendar events
   HaulStatsTracker.cs          per-resource fuel / maintenance / distance, bucketed by month
-  Shortcuts.cs                 F7 keybinding
+  Shortcuts.cs                 F8 keybinding
   Ui/HaulStatsWindow.cs        the stats window
 ```
 
@@ -75,7 +96,7 @@ VehicleRouteStats/
    environment variable pointing at the game's install directory.
 3. `dotnet build VehicleRouteStats\VehicleRouteStats.csproj -c Release`. It deploys to
    `%APPDATA%\Captain of Industry\Mods\VehicleRouteStats` automatically.
-4. Launch the game, enable the mod for a new (or existing) game, press `F7` in-game.
+4. Launch the game, enable the mod for a new (or existing) game, press `F8` in-game.
 
 ## Notes on how this was built
 
