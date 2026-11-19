@@ -25,8 +25,11 @@ This makes that cost visible, and directly in the units you pay it in.
   `MineTower`, or anything for a `TreeHarvester`, counts as mining; a truck running a
   `RefuelOtherVehicleJob` counts as refuelling; everything else is general. That split is taken from
   `VehicleJobStatsManager.RecordJobStatsFor`.
-  Each card shows fuel and maintenance against the actual product icons; distance, delivery count
-  and quantity delivered are still tracked and sit in the card's tooltip.
+  Each card shows two rows of fuel and maintenance against the actual product icons: the top row is
+  the cost of **carrying** that resource, the bottom row the cost of the empty run out to
+  **collect** it. Distance, delivery count and quantity delivered sit in the card's tooltip. A
+  totals row above the grid sums whatever is currently shown, with an **Unattributed** figure beside
+  it for burn that cannot be pinned to a resource.
 - Nothing accrues while the game is paused: sampling is skipped unless the simulation step has
   actually advanced (`ISimLoopEvents.CurrentStep`) and the sim is not paused.
 - Stats are bucketed by calendar month via `Calendar.NewMonth` and **persist across sessions**.
@@ -67,9 +70,38 @@ enum — `None`, `Idle`, `Full` — chosen by the vehicle's current job, so a wo
 flat rate regardless of how fast it happens to be moving. Distance is reported separately, from
 the `LifetimeDistanceTraveled` odometer, because it is still the best measure of route length.
 
-Known limitation: cost is only attributed while a truck is loaded, so empty return legs are not
-charged to anything. Absolute numbers are therefore an undercount of a full round trip, though
-resources remain comparable against each other.
+### What the empty running costs
+
+A truck driving empty is not free, and it turns out to be about half the bill. Nearly every moving
+truck reports its current job as `VehicleQueueJob`, which is a *wrapper*: jobs that have to travel
+somewhere and queue up (`CargoPickUpJob`, `CargoDeliveryJob`, `RefuelSelfJob` and friends) build one
+in their constructor, register themselves as its queue-tip job, and enqueue the wrapper. The real
+job only acts once the truck reaches the head of the queue, and it is reachable from the wrapper
+only through a private field. Its consumption is `IsMoving ? Full : Idle`, so it covers both driving
+and waiting in line.
+
+Rather than reflect into that private field, attribution is **deferred**:
+
+- While a truck is **empty and moving**, its burn is held as pending against that truck.
+- When the **loaded truck departs**, the pending amount is billed to what it is carrying, split by
+  quantity share, and appears as the second row on the card — the *collecting* cost, separate from
+  the *carrying* cost. It waits for departure rather than releasing when the first crate lands,
+  because a mixed load arrives over several ticks and flushing early would hand the whole pickup
+  cost to whichever product loaded first.
+- While a truck is **empty and stationary** — queue idling, refuelling, waiting — the burn goes to
+  an **Unattributed** figure beside the total. Sitting still is not the cost of hauling anything.
+
+This needs no private API and is arguably more honest than reading the job's intent: a pickup can
+fail, re-route, or end up collecting something else, and deferred attribution charges whatever the
+truck genuinely ended up carrying.
+
+Deliberate limitations: an empty leg spanning a month boundary is billed to the month of the pickup;
+pending burn is per-truck transient state that is not persisted, so a save/load drops whatever was
+in flight; and a truck's final empty leg, if it never loads again, stays unattributed.
+
+Still not counted at all: vehicles other than trucks. `Excavator`, `TreeHarvester`, `TreePlanter`
+and `RocketTransporter` are all `Vehicle` subclasses with fuel tanks and maintenance, but only
+`Truck` is sampled. Excavators in particular burn a lot and appear nowhere.
 
 Scope: trucks only for v1. Ships and trains expose cargo differently in the game's API and are
 candidates for a follow-up.
@@ -83,7 +115,7 @@ VehicleRouteStats/
   VehicleRouteStats.csproj    references $(COI_ROOT) game assemblies
   VehicleRouteStatsMod.cs      IMod entry point, wires the tracker to sim/calendar events
   HaulStatsTracker.cs          per-resource fuel / maintenance / distance, bucketed by month
-  Shortcuts.cs                 F8 keybinding
+  Shortcuts.cs                 F8 keybinding (KbHandleBuilder; see note below)
   Ui/HaulStatsWindow.cs        the stats window
 ```
 
@@ -97,6 +129,22 @@ VehicleRouteStats/
 3. `dotnet build VehicleRouteStats\VehicleRouteStats.csproj -c Release`. It deploys to
    `%APPDATA%\Captain of Industry\Mods\VehicleRouteStats` automatically.
 4. Launch the game, enable the mod for a new (or existing) game, press `F8` in-game.
+
+## Keybindings
+
+The keybinding system was reworked in the 0.8.8 era: the old `[Kb(KbCategory…)]` attribute is gone,
+and `RegisterGlobalShortcut` takes a `KbHandle` instead of a `Func<ShortcutsManager, KeyBindings>`.
+Three things are easy to get wrong, each failing quietly rather than loudly:
+
+- The handle id must be `<modId>.<Name>`, or `ShortcutsRegistrationSession.Add` rejects it and
+  `KbHandleBuilder.Build` skips registering the label and tooltip.
+- The handle must be added to `IShortcutsRegistry` (resolve it, a `[GlobalDependency]`) **during
+  `IMod.Initialize`** — the registration window closes once the game is initialized. Skip this and
+  `KbHandle.IsRegistered` stays false, `ShortcutsManager.matches` short-circuits on it, and the key
+  simply does nothing with no error anywhere.
+- Omitting `SetGroup` is deliberate: `KbHandle`'s constructor falls back to
+  `KbGroup.DefaultOf(ownerId)`, giving the mod its own section in the controls settings.
+  `KbGroup.DefaultOf` is not public, so it cannot be called directly.
 
 ## Notes on how this was built
 

@@ -6,6 +6,7 @@ using Mafi.Core.Game;
 using Mafi.Core.Mods;
 using Mafi.Core.Prototypes;
 using Mafi.Core.Simulation;
+using Mafi.Unity.InputControl;
 using VehicleRouteStats.Ui;
 
 namespace VehicleRouteStats;
@@ -62,6 +63,11 @@ public sealed class VehicleRouteStatsMod : IMod
         m_simLoopEvents = resolver.Resolve<ISimLoopEvents>();
         m_calendar = resolver.Resolve<Calendar>();
         m_protosDb = resolver.Resolve<ProtosDb>();
+
+        // Until a handle is in the registry its IsRegistered is false, and ShortcutsManager.matches
+        // short-circuits on that, so the key silently does nothing. The registration window closes
+        // once the game is initialized, which is why this has to happen here.
+        resolver.Resolve<IShortcutsRegistry>().Add(this, Shortcuts.Instance.ToggleWindow);
 
         m_tracker = new HaulStatsTracker(m_entities, m_simLoopEvents);
         m_tracker.RestoreState(JsonConfig.GetString(StateParam, string.Empty), m_protosDb);
