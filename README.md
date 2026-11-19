@@ -4,6 +4,21 @@ A [Captain of Industry](https://captain-of-industry.com) mod that adds a **Vehic
 window: a per-resource breakdown of the **fuel, maintenance and distance** your truck fleet spends
 hauling each resource, not just quantity moved and route count.
 
+Requires **Captain of Industry 0.8.8** or newer.
+
+## Installing
+
+1. Download `VehicleRouteStats-<version>.zip` from the
+   [latest release](https://github.com/chestnut42/coi-vehicle-tracker/releases/latest).
+2. Extract it into `%APPDATA%\Captain of Industry\Mods\` so that you end up with
+   `…\Mods\VehicleRouteStats\VehicleRouteStats.dll`.
+3. Start the game and enable **Vehicle Route Stats** in the mod list.
+4. Press `F8` in game to open the window. The shortcut is rebindable under its own heading in
+   Controls.
+
+Safe to add to an existing save, and safe to remove again. The keybinding system was reworked in
+0.8.8, so this build will not load on older versions.
+
 ## Why
 
 The vanilla vehicle monitor shows quantity moved and route count per resource. A resource hauled
@@ -103,7 +118,7 @@ Still not counted at all: vehicles other than trucks. `Excavator`, `TreeHarveste
 and `RocketTransporter` are all `Vehicle` subclasses with fuel tanks and maintenance, but only
 `Truck` is sampled. Excavators in particular burn a lot and appear nowhere.
 
-Scope: trucks only for v1. Ships and trains expose cargo differently in the game's API and are
+Scope: trucks only. Ships and trains expose cargo differently in the game's API and are
 candidates for a follow-up.
 
 ## Project layout
@@ -150,8 +165,8 @@ Three things are easy to get wrong, each failing quietly rather than loudly:
 
 This game's mod support has no public API reference for UI/gameplay hooks beyond the
 [official content-registration example](https://github.com/MaFi-Games/Captain-of-industry-modding).
-The class and member names this mod relies on (`Truck.Cargo`, `IEntitiesManager`,
-`ISimLoopEvents.UpdateAfterCmdProc`, `Calendar.NewDay`, the `Window`/`WindowController` UI
+The class and member names this mod relies on (`Truck.GetCargoProducts`, `IEntitiesManager`,
+`ISimLoopEvents.UpdateAfterCmdProc`, `Calendar.NewMonth`, the `Window`/`WindowController` UI
 framework, `[GlobalDependency]` DI registration, etc.) were cross-checked against usage in several
 independent open-source community mods rather than guessed from scratch. The code itself is
 original, not copied.
@@ -162,5 +177,8 @@ guesses were wrong: `IConfig` is in `Mafi.Core.Game`, `ProductQuantity` in `Mafi
 respectively (not a single `UiToolkit` namespace). `WindowController<T>` also requires a
 `CreateWindow()` override. Those are fixed and it now compiles clean.
 
-It has been compiled but not yet run in-game. If it loads but misbehaves, check
-`%APPDATA%/Captain of Industry/Logs`.
+If it loads but misbehaves, check `%APPDATA%/Captain of Industry/Logs`.
+
+## License
+
+[MIT](LICENSE).
