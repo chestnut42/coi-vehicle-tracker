@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using Mafi;
 using Mafi.Core;
 using Mafi.Core.Products;
@@ -120,7 +121,7 @@ public sealed class HaulStatsWindow : Window
 
         IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> ordered =
             m_tracker.Snapshot(m_months, m_includeGeneral, m_includeMining, m_includeRefueling)
-                .OrderByDescending(e => e.Value.Fuel);
+                .OrderByDescending(e => e.Value.Fuel + e.Value.PickupFuel);
 
         double totalFuel = 0;
         double totalMaintenance = 0;
@@ -128,18 +129,41 @@ public sealed class HaulStatsWindow : Window
         foreach (var entry in ordered)
         {
             // Summed here rather than from the tracker so the header can only ever show what is drawn.
-            totalFuel += entry.Value.Fuel;
-            totalMaintenance += entry.Value.Maintenance;
-            m_grid.Add(BuildCard(entry.Key, entry.Value));
+            ProductHaulStats stats = entry.Value;
+            totalFuel += stats.Fuel + stats.PickupFuel;
+            totalMaintenance += stats.Maintenance + stats.PickupMaintenance;
+            m_grid.Add(BuildCard(entry.Key, stats));
         }
 
         m_totals.Add(new Label("Total".AsLoc()).FontBold());
         m_totals.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(totalFuel)));
         m_totals.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(totalMaintenance)));
-        m_totals.Tooltip(
-            ($"Total across the resources shown\n" +
-             $"Fuel: {totalFuel:F1}\n" +
-             $"Maintenance: {totalMaintenance:F1}").ToDoLoc());
+
+        List<(string Job, double Fuel, double Maintenance)> unattributed =
+            m_tracker.UnattributedBreakdown(m_months);
+
+        double unattributedFuel = 0;
+        double unattributedMaintenance = 0;
+        foreach (var bucket in unattributed)
+        {
+            unattributedFuel += bucket.Fuel;
+            unattributedMaintenance += bucket.Maintenance;
+        }
+
+        m_totals.Add(new Label("Unattributed".AsLoc()).FontBold());
+        m_totals.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(unattributedFuel)));
+        m_totals.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(unattributedMaintenance)));
+
+        var breakdown = new StringBuilder();
+        breakdown.Append($"Total, carrying plus collecting\nFuel: {totalFuel:F1}\nMaintenance: {totalMaintenance:F1}\n\n");
+        breakdown.Append($"Unattributed — burn with no cargo and not moving,\nsuch as queue idling or refuelling.\n");
+        breakdown.Append($"Fuel: {unattributedFuel:F1}\nMaintenance: {unattributedMaintenance:F1}\n");
+        foreach (var bucket in unattributed)
+        {
+            breakdown.Append($"  {bucket.Job}: {bucket.Fuel:F1} / {bucket.Maintenance:F1}\n");
+        }
+
+        m_totals.Tooltip(breakdown.ToString().ToDoLoc());
     }
 
     private UiComponent BuildCard(ProductProto product, ProductHaulStats stats)
@@ -150,21 +174,26 @@ public sealed class HaulStatsWindow : Window
             .FontSize(11)
             .TextOverflow(TextOverflow.Ellipsis));
 
-        var costs = new Row(4.px()).AlignItemsCenter();
-        costs.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(stats.Fuel)));
-        costs.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(stats.Maintenance)));
+        // Top row is the laden haul, bottom row is the empty run out to collect it.
+        var laden = new Row(4.px()).AlignItemsCenter();
+        laden.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(stats.Fuel)));
+        laden.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(stats.Maintenance)));
+
+        var pickup = new Row(4.px()).AlignItemsCenter();
+        pickup.Add(Cell(m_tracker.FuelProduct, "Fuel", Compact(stats.PickupFuel)));
+        pickup.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(stats.PickupMaintenance)));
 
         var card = new Panel(true);
         card.Width(CardWidth.px());
         card.Body.Add(title);
-        card.Body.Add(costs);
+        card.Body.Add(laden);
+        card.Body.Add(pickup);
 
         // The card shows rounded figures, so the tooltip carries the exact ones plus what didn't fit.
         card.Tooltip(
             ($"{product.Strings.Name}\n" +
-             $"Fuel: {stats.Fuel:F1}\n" +
-             $"Maintenance: {stats.Maintenance:F1}\n" +
-             $"Distance: {stats.Distance:F0}\n" +
+             $"Carrying — fuel {stats.Fuel:F1}, maintenance {stats.Maintenance:F1}, distance {stats.Distance:F0}\n" +
+             $"Collecting — fuel {stats.PickupFuel:F1}, maintenance {stats.PickupMaintenance:F1}, distance {stats.PickupDistance:F0}\n" +
              $"Deliveries: {stats.Deliveries}\n" +
              $"Delivered: {stats.Delivered:F0}").ToDoLoc());
 
@@ -205,7 +234,7 @@ public sealed class HaulStatsWindow : Window
         public Controller(ControllerContext controllerContext) : base(controllerContext)
         {
             controllerContext.UiRoot.AddDependency(this);
-            controllerContext.InputManager.RegisterGlobalShortcut(_ => Shortcuts.Instance.ToggleWindow, this);
+            controllerContext.InputManager.RegisterGlobalShortcut(Shortcuts.Instance.ToggleWindow, this);
         }
 
         protected override HaulStatsWindow CreateWindow()

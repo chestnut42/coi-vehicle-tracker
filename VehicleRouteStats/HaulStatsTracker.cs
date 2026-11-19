@@ -28,9 +28,18 @@ public enum HaulCategory
 
 public sealed class ProductHaulStats
 {
+    /// <summary>Burn while actually carrying this product.</summary>
     public double Fuel;
+
     public double Maintenance;
     public double Distance;
+
+    /// <summary>Burn on the empty run that ended in loading this product, billed retroactively.</summary>
+    public double PickupFuel;
+
+    public double PickupMaintenance;
+    public double PickupDistance;
+
     public int Deliveries;
     public double Delivered;
 
@@ -39,6 +48,9 @@ public sealed class ProductHaulStats
         Fuel += other.Fuel;
         Maintenance += other.Maintenance;
         Distance += other.Distance;
+        PickupFuel += other.PickupFuel;
+        PickupMaintenance += other.PickupMaintenance;
+        PickupDistance += other.PickupDistance;
         Deliveries += other.Deliveries;
         Delivered += other.Delivered;
     }
@@ -57,12 +69,28 @@ public sealed class HaulStatsTracker
 {
     public const int MonthsTracked = 12;
     private const int CategoryCount = 3;
-    private const string StateSchemaVersion = "v1";
+    private const string StateSchemaVersion = "v2";
 
     private sealed class TruckState
     {
         public Fix64 LastOdometer;
         public readonly Dict<ProductProto, double> LastCargo = new();
+
+        // Burn on the current empty run, held until the truck loads something and we learn what the
+        // run was for. Only accumulated while moving, so a truck idling for months cannot dump a
+        // year of fuel onto the first unit it happens to pick up.
+        public double PendingFuel;
+        public double PendingMaintenance;
+        public double PendingDistance;
+
+        public bool HasPending => PendingFuel != 0 || PendingMaintenance != 0 || PendingDistance != 0;
+
+        public void ClearPending()
+        {
+            PendingFuel = 0;
+            PendingMaintenance = 0;
+            PendingDistance = 0;
+        }
     }
 
     private readonly IEntitiesManager m_entities;
@@ -71,6 +99,16 @@ public sealed class HaulStatsTracker
     private readonly Dict<int, TruckState> m_truckStates = new();
     private readonly Dict<ProductProto, ProductHaulStats>[,] m_months =
         new Dict<ProductProto, ProductHaulStats>[CategoryCount, MonthsTracked];
+
+    // Burn we cannot pin to a product, split by the job that was running purely so it can be eyeballed.
+    // Not split by category or product; the UI shows bare figures next to the total.
+    private sealed class UnattributedBucket
+    {
+        public readonly double[] Fuel = new double[MonthsTracked];
+        public readonly double[] Maintenance = new double[MonthsTracked];
+    }
+
+    private readonly Dict<string, UnattributedBucket> m_unattributed = new();
 
     private int m_monthIndex;
     private int m_lastStep = -1;
@@ -121,6 +159,12 @@ public sealed class HaulStatsTracker
         {
             m_months[category, m_monthIndex].Clear();
         }
+
+        foreach (var bucket in m_unattributed)
+        {
+            bucket.Value.Fuel[m_monthIndex] = 0;
+            bucket.Value.Maintenance[m_monthIndex] = 0;
+        }
     }
 
     public void OnEntityRemoved(IEntity entity) => m_truckStates.Remove(entity.Id.Value);
@@ -132,8 +176,41 @@ public sealed class HaulStatsTracker
             bucket.Clear();
         }
 
+        m_unattributed.Clear();
         m_truckStates.Clear();
         m_monthIndex = 0;
+    }
+
+    /// <summary>
+    /// Fuel and maintenance burned by running that cannot be pinned to a product, broken down by the
+    /// job that was running. Scoped by month like <see cref="Snapshot"/>, but not by category — it
+    /// has no meaningful category. Ordered by fuel, descending.
+    /// </summary>
+    public List<(string Job, double Fuel, double Maintenance)> UnattributedBreakdown(int months)
+    {
+        int count = months < MonthsTracked ? months : MonthsTracked;
+        var result = new List<(string Job, double Fuel, double Maintenance)>();
+
+        foreach (var entry in m_unattributed)
+        {
+            double fuel = 0;
+            double maintenance = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
+                fuel += entry.Value.Fuel[index];
+                maintenance += entry.Value.Maintenance[index];
+            }
+
+            if (fuel != 0 || maintenance != 0)
+            {
+                result.Add((entry.Key, fuel, maintenance));
+            }
+        }
+
+        result.Sort((a, b) => b.Fuel.CompareTo(a.Fuel));
+        return result;
     }
 
     /// <summary>
@@ -196,6 +273,18 @@ public sealed class HaulStatsTracker
         {
             int index = ((m_monthIndex - offset) % MonthsTracked + MonthsTracked) % MonthsTracked;
 
+            foreach (var entry in m_unattributed)
+            {
+                if (entry.Value.Fuel[index] == 0 && entry.Value.Maintenance[index] == 0)
+                {
+                    continue;
+                }
+
+                sb.Append(";j,").Append(offset).Append(',').Append(entry.Key).Append(',')
+                    .Append(Num(entry.Value.Fuel[index])).Append(',')
+                    .Append(Num(entry.Value.Maintenance[index]));
+            }
+
             for (int category = 0; category < CategoryCount; category++)
             {
                 foreach (var entry in m_months[category, index])
@@ -209,7 +298,10 @@ public sealed class HaulStatsTracker
                         .Append(Num(s.Maintenance)).Append(',')
                         .Append(Num(s.Distance)).Append(',')
                         .Append(s.Deliveries.ToString(CultureInfo.InvariantCulture)).Append(',')
-                        .Append(Num(s.Delivered));
+                        .Append(Num(s.Delivered)).Append(',')
+                        .Append(Num(s.PickupFuel)).Append(',')
+                        .Append(Num(s.PickupMaintenance)).Append(',')
+                        .Append(Num(s.PickupDistance));
 
                     // Rather than fail the save, drop the oldest months that no longer fit.
                     if (sb.Length > maxLength)
@@ -246,7 +338,25 @@ public sealed class HaulStatsTracker
         for (int i = 1; i < records.Length; i++)
         {
             string[] f = records[i].Split(',');
-            if (f.Length != 8
+
+            // "u" is the earlier single-figure form; fold it into one bucket rather than lose it.
+            if ((f.Length == 4 && f[0] == "u") || (f.Length == 5 && f[0] == "j"))
+            {
+                if (int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int unattributedOffset)
+                    && unattributedOffset >= 0 && unattributedOffset < MonthsTracked)
+                {
+                    bool isNamed = f[0] == "j";
+                    UnattributedBucket bucket = GetOrAddUnattributed(isNamed ? f[2] : "Earlier");
+                    int slot = (MonthsTracked - unattributedOffset) % MonthsTracked;
+                    bucket.Fuel[slot] = Parse(isNamed ? f[3] : f[2]);
+                    bucket.Maintenance[slot] = Parse(isNamed ? f[4] : f[3]);
+                }
+
+                continue;
+            }
+
+            // 8 fields is the earlier form, before pickup burn was tracked separately.
+            if ((f.Length != 8 && f.Length != 11)
                 || !int.TryParse(f[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int category)
                 || !int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset)
                 || category < 0 || category >= CategoryCount
@@ -262,6 +372,13 @@ public sealed class HaulStatsTracker
             stats.Distance = Parse(f[5]);
             stats.Deliveries = (int)Parse(f[6]);
             stats.Delivered = Parse(f[7]);
+
+            if (f.Length == 11)
+            {
+                stats.PickupFuel = Parse(f[8]);
+                stats.PickupMaintenance = Parse(f[9]);
+                stats.PickupDistance = Parse(f[10]);
+            }
         }
     }
 
@@ -329,7 +446,7 @@ public sealed class HaulStatsTracker
 
         Lyst<ProductQuantity> cargo = m_cargoBuffer;
         cargo.Clear();
-        truck.Cargo.GetCargoProducts(cargo);
+        truck.GetCargoProducts(cargo);
 
         double totalQuantity = 0;
         foreach (ProductQuantity pq in cargo)
@@ -339,6 +456,15 @@ public sealed class HaulStatsTracker
 
         if (totalQuantity > 0)
         {
+            // The empty run that got the truck here is billed to whatever it actually loaded, which
+            // is more honest than reading the job's intent: a pickup can fail, re-route, or end up
+            // collecting something else entirely.
+            //
+            // Held until the loaded truck departs, not released the moment the first crate lands: a
+            // mixed load arrives over several ticks, and flushing early would hand the whole pickup
+            // cost to whichever product happened to be loaded first.
+            bool flushPending = truck.IsMoving && state.HasPending;
+
             foreach (ProductQuantity pq in cargo)
             {
                 // A mixed load splits the trip's cost by how much of it each product occupies.
@@ -347,7 +473,35 @@ public sealed class HaulStatsTracker
                 stats.Fuel += fuel * share;
                 stats.Maintenance += maintenance * share;
                 stats.Distance += distance * share;
+
+                if (flushPending)
+                {
+                    stats.PickupFuel += state.PendingFuel * share;
+                    stats.PickupMaintenance += state.PendingMaintenance * share;
+                    stats.PickupDistance += state.PendingDistance * share;
+                }
             }
+
+            if (flushPending)
+            {
+                state.ClearPending();
+            }
+        }
+        else if (truck.IsMoving)
+        {
+            // Empty and moving: hold the cost until the truck loads and reveals what the run was for.
+            state.PendingFuel += fuel;
+            state.PendingMaintenance += maintenance;
+            state.PendingDistance += distance;
+        }
+        else if (fuel != 0 || maintenance != 0)
+        {
+            // Empty and stationary — queue idling, refuelling, waiting. Not the cost of hauling
+            // anything, so it stays out of the product rows.
+            UnattributedBucket bucket = GetOrAddUnattributed(
+                truck.CurrentJob.ValueOrNull?.GetType().Name ?? "NoJob");
+            bucket.Fuel[m_monthIndex] += fuel;
+            bucket.Maintenance[m_monthIndex] += maintenance;
         }
 
         RecordDeliveries(truck, cargo, state);
@@ -393,6 +547,17 @@ public sealed class HaulStatsTracker
         {
             state.LastCargo[pq.Product] = pq.Quantity.Value;
         }
+    }
+
+    private UnattributedBucket GetOrAddUnattributed(string job)
+    {
+        if (!m_unattributed.TryGetValue(job, out UnattributedBucket bucket))
+        {
+            bucket = new UnattributedBucket();
+            m_unattributed.Add(job, bucket);
+        }
+
+        return bucket;
     }
 
     private static ProductHaulStats GetOrAdd(Dict<ProductProto, ProductHaulStats> bucket, ProductProto product)
