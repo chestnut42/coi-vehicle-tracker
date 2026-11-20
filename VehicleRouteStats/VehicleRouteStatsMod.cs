@@ -16,7 +16,12 @@ public sealed class VehicleRouteStatsMod : IMod
     // Config params are declared in config.json; the game persists their values into the save, which
     // is what lets the stats survive a reload without the mod owning any save format of its own.
     private const string StateParam = "stats_state";
-    private const int StateMaxLength = 190_000;
+
+    // Must stay under the max_length declared in config.json. The ceiling is entirely ours — the game
+    // only validates against the value the mod declares — and splitting buckets by vehicle group
+    // multiplies the worst-case record count, so there is headroom here rather than silent dropping
+    // of the oldest months.
+    private const int StateMaxLength = 480_000;
 
     private readonly ModManifest m_manifest;
 
@@ -69,7 +74,7 @@ public sealed class VehicleRouteStatsMod : IMod
         // once the game is initialized, which is why this has to happen here.
         resolver.Resolve<IShortcutsRegistry>().Add(this, Shortcuts.Instance.ToggleWindow);
 
-        m_tracker = new HaulStatsTracker(m_entities, m_simLoopEvents);
+        m_tracker = new HaulStatsTracker(m_entities, m_simLoopEvents, m_protosDb);
         m_tracker.RestoreState(JsonConfig.GetString(StateParam, string.Empty), m_protosDb);
 
         m_simLoopEvents.UpdateAfterCmdProc.AddNonSaveable(this, OnSimUpdate);

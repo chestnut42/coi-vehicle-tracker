@@ -35,7 +35,18 @@ This makes that cost visible, and directly in the units you pay it in.
   transitions rather than duplicating whatever internal counters the vanilla monitor uses.
 - Adds a window (default shortcut `F8`) showing one compact card per resource in a 4-column grid,
   sorted by fuel burned descending, with a dropdown to scope to the last 1, 3, 6 or 12 months and
-  independent toggles for general / mining / refuelling hauls. The toggles use the same categories,
+  two independent columns of filters: one for general / mining / refuelling hauls, one for vehicle
+  class. The class filters come from the game's own `VehicleGroupProto` — pickup trucks, trucks,
+  haul trucks and amphibious trucks in the base game — and are enumerated from the protos db rather
+  than hardcoded, so a mod that registers its own vehicle group gets a tickbox for free. A group
+  already aggregates its tier's fuel variants (diesel and hydrogen) and attachment variants (dump,
+  tank, flatbed), which is exactly the granularity the filter wants. Groups are ordered by the
+  smallest truck each one holds, so pickups come before trucks before haul trucks without relying
+  on the base game's ids.
+  The two filter dimensions are genuinely independent, which means the buckets have to be stored as
+  the cross product of (category, group, month, product): per-category and per-group totals cannot
+  be intersected after the fact.
+  The job toggles use the same categories,
   localized labels and tooltips as the vanilla truck stats tab: a truck hauling loose product for a
   `MineTower`, or anything for a `TreeHarvester`, counts as mining; a truck running a
   `RefuelOtherVehicleJob` counts as refuelling; everything else is general. That split is taken from
@@ -60,14 +71,23 @@ parameter declared in `config.json` — written on `ISimLoopEvents.BeforeSave`, 
 The upshot is that the data is per-save automatically, and travels with a save that is copied or
 renamed, without this mod defining any save format of its own. Some deliberate choices:
 
-- One record per (category, month, product); months are stored as an offset back from the current
-  one, so the ring buffer's rotation does not have to survive the round trip.
+- One record per (category, group, month, product); months are stored as an offset back from the
+  current one, so the ring buffer's rotation does not have to survive the round trip, and the group
+  is stored by proto id, so the slot ordering does not either. A group id that no longer resolves —
+  another mod removed, say — lands in a catch-all slot instead of being folded into a live group's
+  numbers.
 - Numbers are written with `CultureInfo.InvariantCulture` — a locale that formats decimals with a
   comma would otherwise split a record in half.
 - A schema version prefix; a blob written by a different version is ignored rather than misread.
+  The vehicle-class split bumped this to `v3`, and because older blobs carry no class at all there
+  is nothing to migrate: upgrading to 0.3.0 starts the 12-month window over on an existing save.
 - Anything unparseable is skipped, so a bad blob costs history but never blocks loading a save.
 - If the data would exceed the parameter's length limit, the oldest months are dropped instead of
-  failing the save.
+  failing the save. That limit is entirely self-imposed: it is the `max_length` this mod declares
+  for its own parameter, and `ModJsonConfigParam.Validate` only ever compares against the declared
+  value, so there is no game-side ceiling to work around. Splitting buckets by vehicle class
+  multiplies the worst-case record count, so the declared limit was raised to leave headroom rather
+  than let months start falling off a long-running save.
 
 ### Why fuel and not vehicle-hours
 
@@ -113,6 +133,12 @@ truck genuinely ended up carrying.
 Deliberate limitations: an empty leg spanning a month boundary is billed to the month of the pickup;
 pending burn is per-truck transient state that is not persisted, so a save/load drops whatever was
 in flight; and a truck's final empty leg, if it never loads again, stays unattributed.
+
+Fuel is reported as a single figure regardless of which fuel it actually was. Every truck tier
+ships in a diesel and a hydrogen variant, and both land in the same vehicle group, so a fleet
+mid-transition adds diesel to hydrogen and labels the sum with whichever fuel product was observed
+first. This is a deliberate trade: in a given save a fleet is usually on one fuel, and the
+changeover is short. Splitting fuel by product would be the fix if that stops being true.
 
 Still not counted at all: vehicles other than trucks. `Excavator`, `TreeHarvester`, `TreePlanter`
 and `RocketTransporter` are all `Vehicle` subclasses with fuel tanks and maintenance, but only
