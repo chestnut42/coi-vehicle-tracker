@@ -5,6 +5,7 @@ using System.Text;
 using Mafi;
 using Mafi.Core;
 using Mafi.Core.Products;
+using Mafi.Core.Vehicles;
 using Mafi.Localization;
 using Mafi.Unity.InputControl;
 using Mafi.Unity.Ui.Library;
@@ -25,11 +26,16 @@ public sealed class HaulStatsWindow : Window
 
     private readonly Grid m_grid;
     private readonly Row m_totals;
+    private readonly Column m_groupFilters;
     private HaulStatsTracker m_tracker;
+    private bool[] m_includeSlot = EmptySlots;
     private int m_months = 12;
     private bool m_includeGeneral = true;
     private bool m_includeMining = true;
     private bool m_includeRefueling = true;
+
+    // Stands in until a tracker arrives; Snapshot indexes it, so it must never be null.
+    private static readonly bool[] EmptySlots = new bool[0];
 
     public HaulStatsWindow() : base(new LocStrFormatted("Vehicle Route Stats"), true)
     {
@@ -54,26 +60,39 @@ public sealed class HaulStatsWindow : Window
 
         // Vanilla stacks the three category toggles in a column; a row of them overflows the window.
         var categories = new Column(1.pt());
-        categories.Add(CategoryToggle(
+        categories.Add(FilterToggle(
             Tr.TrucksStats__OptionGeneral,
             Tr.TrucksStats__OptionGeneralTooltip,
             () => m_includeGeneral,
             isOn => m_includeGeneral = isOn));
-        categories.Add(CategoryToggle(
+        categories.Add(FilterToggle(
             Tr.TrucksStats__OptionMining,
             Tr.TrucksStats__OptionMiningTooltip,
             () => m_includeMining,
             isOn => m_includeMining = isOn));
-        categories.Add(CategoryToggle(
+        categories.Add(FilterToggle(
             Tr.TrucksStats__OptionRefueling,
             Tr.TrucksStats__OptionRefuelingTooltip,
             () => m_includeRefueling,
             isOn => m_includeRefueling = isOn));
 
-        var toolbar = new Row(10.px()).AlignItemsCenter();
-        toolbar.Add(rangeDropdown);
-        toolbar.Add(categories);
-        toolbar.Add(resetButton);
+        // Filled once a tracker is attached: the groups are prototypes, so the set is not known until
+        // the game's protos are loaded.
+        m_groupFilters = new Column(1.pt());
+
+        // Two rows rather than one: a second column of toggles beside the first would overflow a
+        // window sized to the card grid, and height is Px.Auto so growing downwards is free.
+        var topRow = new Row(10.px()).AlignItemsCenter();
+        topRow.Add(rangeDropdown);
+        topRow.Add(resetButton);
+
+        var filterRow = new Row(16.px());
+        filterRow.Add(categories);
+        filterRow.Add(m_groupFilters);
+
+        var toolbar = new Column(6.px());
+        toolbar.Add(topRow);
+        toolbar.Add(filterRow);
 
         m_totals = new Row(4.px()).AlignItemsCenter();
 
@@ -92,9 +111,52 @@ public sealed class HaulStatsWindow : Window
         RootElement.schedule.Execute(Refresh).Every(1000L);
     }
 
-    public void SetTracker(HaulStatsTracker tracker) => m_tracker = tracker;
+    public void SetTracker(HaulStatsTracker tracker)
+    {
+        m_tracker = tracker;
+        BuildGroupFilters();
+        Refresh();
+    }
 
-    private Toggle CategoryToggle(LocStr label, LocStr tooltip, Func<bool> get, Action<bool> set) =>
+    /// <summary>
+    /// One toggle per registered vehicle group, so a mod that adds vehicles gets a filter without
+    /// this window knowing about it. The catch-all slot only earns a toggle once something lands in
+    /// it, which normally never happens.
+    /// </summary>
+    private void BuildGroupFilters()
+    {
+        m_groupFilters.Clear();
+        if (m_tracker == null)
+        {
+            m_includeSlot = EmptySlots;
+            return;
+        }
+
+        m_includeSlot = new bool[m_tracker.SlotCount];
+        for (int i = 0; i < m_includeSlot.Length; i++)
+        {
+            m_includeSlot[i] = true;
+        }
+
+        IReadOnlyList<VehicleGroupProto> groups = m_tracker.Groups;
+        for (int i = 0; i < groups.Count; i++)
+        {
+            int slot = i;
+            m_groupFilters.Add(SlotToggle(groups[i].Strings.Name, slot));
+        }
+
+        if (m_tracker.HasAnyDataIn(m_tracker.UnknownSlot))
+        {
+            m_groupFilters.Add(SlotToggle(
+                new LocStrFormatted("Other"),
+                m_tracker.UnknownSlot));
+        }
+    }
+
+    private Toggle SlotToggle(LocStrFormatted label, int slot) =>
+        FilterToggle(label, label, () => m_includeSlot[slot], isOn => m_includeSlot[slot] = isOn);
+
+    private Toggle FilterToggle(LocStrFormatted label, LocStrFormatted tooltip, Func<bool> get, Action<bool> set) =>
         new Toggle(true)
             .Label(label)
             .Tooltip(tooltip)
@@ -120,7 +182,7 @@ public sealed class HaulStatsWindow : Window
         m_totals.Clear();
 
         IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> ordered =
-            m_tracker.Snapshot(m_months, m_includeGeneral, m_includeMining, m_includeRefueling)
+            m_tracker.Snapshot(m_months, m_includeGeneral, m_includeMining, m_includeRefueling, m_includeSlot)
                 .OrderByDescending(e => e.Value.Fuel + e.Value.PickupFuel);
 
         double totalFuel = 0;
@@ -140,7 +202,7 @@ public sealed class HaulStatsWindow : Window
         m_totals.Add(Cell(m_tracker.MaintenanceProduct, "Maint", Compact(totalMaintenance)));
 
         List<(string Job, double Fuel, double Maintenance)> unattributed =
-            m_tracker.UnattributedBreakdown(m_months);
+            m_tracker.UnattributedBreakdown(m_months, m_includeSlot);
 
         double unattributedFuel = 0;
         double unattributedMaintenance = 0;

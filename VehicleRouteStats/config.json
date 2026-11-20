@@ -2,6 +2,6 @@
   "stats_state": {
     "default": "",
     "description": "Accumulated per-resource haul stats. Written by the mod, not meant to be edited by hand. Clearing it resets the stats for this save.",
-    "max_length": 200000
+    "max_length": 500000
   }
 }

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using Mafi;
 using Mafi.Collections;
@@ -10,6 +11,7 @@ using Mafi.Core.Maintenance;
 using Mafi.Core.Products;
 using Mafi.Core.Prototypes;
 using Mafi.Core.Simulation;
+using Mafi.Core.Vehicles;
 using Mafi.Core.Vehicles.Jobs;
 using Mafi.Core.Vehicles.TreeHarvesters;
 using Mafi.Core.Vehicles.Trucks;
@@ -69,7 +71,10 @@ public sealed class HaulStatsTracker
 {
     public const int MonthsTracked = 12;
     private const int CategoryCount = 3;
-    private const string StateSchemaVersion = "v2";
+    private const string StateSchemaVersion = "v3";
+
+    /// <summary>Written in place of a group id for the catch-all slot; not a valid proto id.</summary>
+    private const string UnknownGroupId = "?";
 
     private sealed class TruckState
     {
@@ -97,18 +102,27 @@ public sealed class HaulStatsTracker
     private readonly ISimLoopEvents m_simLoopEvents;
     private readonly Lyst<ProductQuantity> m_cargoBuffer = new(4);
     private readonly Dict<int, TruckState> m_truckStates = new();
-    private readonly Dict<ProductProto, ProductHaulStats>[,] m_months =
-        new Dict<ProductProto, ProductHaulStats>[CategoryCount, MonthsTracked];
+
+    // Vehicle groups are prototypes, so the set is whatever this install has registered — four in the
+    // base game, more if another mod adds vehicles. One extra slot sits past the end as a catch-all
+    // for a truck whose group somehow is not in the db, so its burn is never silently discarded.
+    private readonly VehicleGroupProto[] m_groups;
+    private readonly Dict<VehicleGroupProto, int> m_groupSlots = new();
+
+    // [category, group slot, month]. Category and group are filtered independently in the UI, so the
+    // buckets have to be the cross product: per-category and per-group totals cannot be intersected
+    // after the fact.
+    private readonly Dict<ProductProto, ProductHaulStats>[,,] m_months;
 
     // Burn we cannot pin to a product, split by the job that was running purely so it can be eyeballed.
-    // Not split by category or product; the UI shows bare figures next to the total.
+    // Per group slot, so the figure beside the total still agrees with the group filter.
     private sealed class UnattributedBucket
     {
         public readonly double[] Fuel = new double[MonthsTracked];
         public readonly double[] Maintenance = new double[MonthsTracked];
     }
 
-    private readonly Dict<string, UnattributedBucket> m_unattributed = new();
+    private readonly Dict<string, UnattributedBucket>[] m_unattributed;
 
     private int m_monthIndex;
     private int m_lastStep = -1;
@@ -118,16 +132,49 @@ public sealed class HaulStatsTracker
 
     public ProductProto MaintenanceProduct { get; private set; }
 
-    public HaulStatsTracker(IEntitiesManager entities, ISimLoopEvents simLoopEvents)
+    /// <summary>The vehicle groups to offer as filters, in display order.</summary>
+    public IReadOnlyList<VehicleGroupProto> Groups => m_groups;
+
+    /// <summary>Group filter slots, including the trailing catch-all. Indexes every filter array.</summary>
+    public int SlotCount => m_groups.Length + 1;
+
+    /// <summary>Slot that collects trucks whose group is not registered; normally stays empty.</summary>
+    public int UnknownSlot => m_groups.Length;
+
+    public HaulStatsTracker(IEntitiesManager entities, ISimLoopEvents simLoopEvents, ProtosDb protosDb)
     {
         m_entities = entities;
         m_simLoopEvents = simLoopEvents;
+
+        // Ordered by the smallest truck each group holds, which puts pickups before trucks before haul
+        // trucks without hardcoding the base game's four ids, and gives a mod-added group a sensible
+        // place to land. Id breaks ties so the order is stable across runs.
+        m_groups = protosDb.All<VehicleGroupProto>()
+            .OrderBy(g => g.Trucks.Count == 0 ? int.MaxValue : g.Trucks.Min(t => t.CapacityBase.Value))
+            .ThenBy(g => g.Id.Value)
+            .ToArray();
+
+        for (int i = 0; i < m_groups.Length; i++)
+        {
+            m_groupSlots.Add(m_groups[i], i);
+        }
+
+        m_months = new Dict<ProductProto, ProductHaulStats>[CategoryCount, SlotCount, MonthsTracked];
         for (int category = 0; category < CategoryCount; category++)
         {
-            for (int month = 0; month < MonthsTracked; month++)
+            for (int slot = 0; slot < SlotCount; slot++)
             {
-                m_months[category, month] = new Dict<ProductProto, ProductHaulStats>();
+                for (int month = 0; month < MonthsTracked; month++)
+                {
+                    m_months[category, slot, month] = new Dict<ProductProto, ProductHaulStats>();
+                }
             }
+        }
+
+        m_unattributed = new Dict<string, UnattributedBucket>[SlotCount];
+        for (int slot = 0; slot < SlotCount; slot++)
+        {
+            m_unattributed[slot] = new Dict<string, UnattributedBucket>();
         }
     }
 
@@ -157,13 +204,19 @@ public sealed class HaulStatsTracker
         m_monthIndex = (m_monthIndex + 1) % MonthsTracked;
         for (int category = 0; category < CategoryCount; category++)
         {
-            m_months[category, m_monthIndex].Clear();
+            for (int slot = 0; slot < SlotCount; slot++)
+            {
+                m_months[category, slot, m_monthIndex].Clear();
+            }
         }
 
-        foreach (var bucket in m_unattributed)
+        foreach (var slotBuckets in m_unattributed)
         {
-            bucket.Value.Fuel[m_monthIndex] = 0;
-            bucket.Value.Maintenance[m_monthIndex] = 0;
+            foreach (var bucket in slotBuckets)
+            {
+                bucket.Value.Fuel[m_monthIndex] = 0;
+                bucket.Value.Maintenance[m_monthIndex] = 0;
+            }
         }
     }
 
@@ -176,36 +229,74 @@ public sealed class HaulStatsTracker
             bucket.Clear();
         }
 
-        m_unattributed.Clear();
+        foreach (var slotBuckets in m_unattributed)
+        {
+            slotBuckets.Clear();
+        }
+
         m_truckStates.Clear();
         m_monthIndex = 0;
     }
 
+    /// <summary>Whether a group slot holds anything over the whole ring, to hide empty filters.</summary>
+    public bool HasAnyDataIn(int slot)
+    {
+        for (int category = 0; category < CategoryCount; category++)
+        {
+            for (int month = 0; month < MonthsTracked; month++)
+            {
+                if (m_months[category, slot, month].Count > 0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return m_unattributed[slot].Count > 0;
+    }
+
     /// <summary>
     /// Fuel and maintenance burned by running that cannot be pinned to a product, broken down by the
-    /// job that was running. Scoped by month like <see cref="Snapshot"/>, but not by category — it
-    /// has no meaningful category. Ordered by fuel, descending.
+    /// job that was running. Scoped by month and group like <see cref="Snapshot"/>, but not by
+    /// category — it has no meaningful category. Ordered by fuel, descending.
     /// </summary>
-    public List<(string Job, double Fuel, double Maintenance)> UnattributedBreakdown(int months)
+    public List<(string Job, double Fuel, double Maintenance)> UnattributedBreakdown(
+        int months,
+        bool[] includeSlot)
     {
         int count = months < MonthsTracked ? months : MonthsTracked;
-        var result = new List<(string Job, double Fuel, double Maintenance)>();
+        var merged = new Dict<string, (double Fuel, double Maintenance)>();
 
-        foreach (var entry in m_unattributed)
+        for (int slot = 0; slot < SlotCount; slot++)
         {
-            double fuel = 0;
-            double maintenance = 0;
-
-            for (int i = 0; i < count; i++)
+            if (!includeSlot[slot])
             {
-                int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
-                fuel += entry.Value.Fuel[index];
-                maintenance += entry.Value.Maintenance[index];
+                continue;
             }
 
-            if (fuel != 0 || maintenance != 0)
+            foreach (var entry in m_unattributed[slot])
             {
-                result.Add((entry.Key, fuel, maintenance));
+                double fuel = 0;
+                double maintenance = 0;
+
+                for (int i = 0; i < count; i++)
+                {
+                    int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
+                    fuel += entry.Value.Fuel[index];
+                    maintenance += entry.Value.Maintenance[index];
+                }
+
+                merged.TryGetValue(entry.Key, out var running);
+                merged[entry.Key] = (running.Fuel + fuel, running.Maintenance + maintenance);
+            }
+        }
+
+        var result = new List<(string Job, double Fuel, double Maintenance)>();
+        foreach (var entry in merged)
+        {
+            if (entry.Value.Fuel != 0 || entry.Value.Maintenance != 0)
+            {
+                result.Add((entry.Key, entry.Value.Fuel, entry.Value.Maintenance));
             }
         }
 
@@ -215,13 +306,14 @@ public sealed class HaulStatsTracker
 
     /// <summary>
     /// Totals over the last <paramref name="months"/> buckets, most recent (partial) month included,
-    /// restricted to the categories whose flag is set.
+    /// restricted to the categories whose flag is set and the group slots whose flag is set.
     /// </summary>
     public IEnumerable<KeyValuePair<ProductProto, ProductHaulStats>> Snapshot(
         int months,
         bool general,
         bool mining,
-        bool refueling)
+        bool refueling,
+        bool[] includeSlot)
     {
         var totals = new Dict<ProductProto, ProductHaulStats>();
         int count = months < MonthsTracked ? months : MonthsTracked;
@@ -240,18 +332,26 @@ public sealed class HaulStatsTracker
                 continue;
             }
 
-            for (int i = 0; i < count; i++)
+            for (int slot = 0; slot < SlotCount; slot++)
             {
-                int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
-                foreach (var entry in m_months[category, index])
+                if (!includeSlot[slot])
                 {
-                    if (!totals.TryGetValue(entry.Key, out ProductHaulStats sum))
-                    {
-                        sum = new ProductHaulStats();
-                        totals.Add(entry.Key, sum);
-                    }
+                    continue;
+                }
 
-                    sum.Add(entry.Value);
+                for (int i = 0; i < count; i++)
+                {
+                    int index = ((m_monthIndex - i) % MonthsTracked + MonthsTracked) % MonthsTracked;
+                    foreach (var entry in m_months[category, slot, index])
+                    {
+                        if (!totals.TryGetValue(entry.Key, out ProductHaulStats sum))
+                        {
+                            sum = new ProductHaulStats();
+                            totals.Add(entry.Key, sum);
+                        }
+
+                        sum.Add(entry.Value);
+                    }
                 }
             }
         }
@@ -260,9 +360,10 @@ public sealed class HaulStatsTracker
     }
 
     /// <summary>
-    /// Flattens every bucket to one line per (category, month, product). Months are written as an
-    /// offset back from the current one so the ring's rotation does not have to survive the round
-    /// trip. Numbers are invariant-culture; a decimal comma would otherwise split a record in half.
+    /// Flattens every bucket to one line per (category, group, month, product). Months are written as
+    /// an offset back from the current one so the ring's rotation does not have to survive the round
+    /// trip, and groups by proto id so the slot ordering does not either. Numbers are
+    /// invariant-culture; a decimal comma would otherwise split a record in half.
     /// </summary>
     public string SerializeState(int maxLength)
     {
@@ -273,41 +374,48 @@ public sealed class HaulStatsTracker
         {
             int index = ((m_monthIndex - offset) % MonthsTracked + MonthsTracked) % MonthsTracked;
 
-            foreach (var entry in m_unattributed)
+            for (int slot = 0; slot < SlotCount; slot++)
             {
-                if (entry.Value.Fuel[index] == 0 && entry.Value.Maintenance[index] == 0)
+                string groupId = GroupIdOf(slot);
+
+                foreach (var entry in m_unattributed[slot])
                 {
-                    continue;
+                    if (entry.Value.Fuel[index] == 0 && entry.Value.Maintenance[index] == 0)
+                    {
+                        continue;
+                    }
+
+                    sb.Append(";j,").Append(groupId).Append(',').Append(offset).Append(',')
+                        .Append(entry.Key).Append(',')
+                        .Append(Num(entry.Value.Fuel[index])).Append(',')
+                        .Append(Num(entry.Value.Maintenance[index]));
                 }
 
-                sb.Append(";j,").Append(offset).Append(',').Append(entry.Key).Append(',')
-                    .Append(Num(entry.Value.Fuel[index])).Append(',')
-                    .Append(Num(entry.Value.Maintenance[index]));
-            }
-
-            for (int category = 0; category < CategoryCount; category++)
-            {
-                foreach (var entry in m_months[category, index])
+                for (int category = 0; category < CategoryCount; category++)
                 {
-                    ProductHaulStats s = entry.Value;
-                    int lengthBeforeMonth = sb.Length;
-
-                    sb.Append(';').Append(category).Append(',').Append(offset).Append(',')
-                        .Append(entry.Key.Id.Value).Append(',')
-                        .Append(Num(s.Fuel)).Append(',')
-                        .Append(Num(s.Maintenance)).Append(',')
-                        .Append(Num(s.Distance)).Append(',')
-                        .Append(s.Deliveries.ToString(CultureInfo.InvariantCulture)).Append(',')
-                        .Append(Num(s.Delivered)).Append(',')
-                        .Append(Num(s.PickupFuel)).Append(',')
-                        .Append(Num(s.PickupMaintenance)).Append(',')
-                        .Append(Num(s.PickupDistance));
-
-                    // Rather than fail the save, drop the oldest months that no longer fit.
-                    if (sb.Length > maxLength)
+                    foreach (var entry in m_months[category, slot, index])
                     {
-                        sb.Length = lengthBeforeMonth;
-                        return sb.ToString();
+                        ProductHaulStats s = entry.Value;
+                        int lengthBeforeRecord = sb.Length;
+
+                        sb.Append(';').Append(category).Append(',').Append(groupId).Append(',')
+                            .Append(offset).Append(',')
+                            .Append(entry.Key.Id.Value).Append(',')
+                            .Append(Num(s.Fuel)).Append(',')
+                            .Append(Num(s.Maintenance)).Append(',')
+                            .Append(Num(s.Distance)).Append(',')
+                            .Append(s.Deliveries.ToString(CultureInfo.InvariantCulture)).Append(',')
+                            .Append(Num(s.Delivered)).Append(',')
+                            .Append(Num(s.PickupFuel)).Append(',')
+                            .Append(Num(s.PickupMaintenance)).Append(',')
+                            .Append(Num(s.PickupDistance));
+
+                        // Rather than fail the save, drop the oldest months that no longer fit.
+                        if (sb.Length > maxLength)
+                        {
+                            sb.Length = lengthBeforeRecord;
+                            return sb.ToString();
+                        }
                     }
                 }
             }
@@ -318,7 +426,8 @@ public sealed class HaulStatsTracker
 
     /// <summary>
     /// Restores what <see cref="SerializeState"/> wrote. Anything unparseable is skipped rather than
-    /// thrown, so a blob from an older mod version costs history but never blocks a load.
+    /// thrown, so a blob from an older mod version costs history but never blocks a load. Blobs from
+    /// before the vehicle-group split carry no group and are dropped wholesale by the version check.
     /// </summary>
     public void RestoreState(string data, ProtosDb protosDb)
     {
@@ -339,47 +448,69 @@ public sealed class HaulStatsTracker
         {
             string[] f = records[i].Split(',');
 
-            // "u" is the earlier single-figure form; fold it into one bucket rather than lose it.
-            if ((f.Length == 4 && f[0] == "u") || (f.Length == 5 && f[0] == "j"))
+            if (f.Length == 6 && f[0] == "j")
             {
-                if (int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int unattributedOffset)
-                    && unattributedOffset >= 0 && unattributedOffset < MonthsTracked)
+                if (TryParseSlot(f[1], protosDb, out int jobSlot)
+                    && int.TryParse(f[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int jobOffset)
+                    && jobOffset >= 0 && jobOffset < MonthsTracked)
                 {
-                    bool isNamed = f[0] == "j";
-                    UnattributedBucket bucket = GetOrAddUnattributed(isNamed ? f[2] : "Earlier");
-                    int slot = (MonthsTracked - unattributedOffset) % MonthsTracked;
-                    bucket.Fuel[slot] = Parse(isNamed ? f[3] : f[2]);
-                    bucket.Maintenance[slot] = Parse(isNamed ? f[4] : f[3]);
+                    UnattributedBucket bucket = GetOrAddUnattributed(jobSlot, f[3]);
+                    int monthSlot = (MonthsTracked - jobOffset) % MonthsTracked;
+                    bucket.Fuel[monthSlot] = Parse(f[4]);
+                    bucket.Maintenance[monthSlot] = Parse(f[5]);
                 }
 
                 continue;
             }
 
-            // 8 fields is the earlier form, before pickup burn was tracked separately.
-            if ((f.Length != 8 && f.Length != 11)
+            if (f.Length != 12
                 || !int.TryParse(f[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int category)
-                || !int.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset)
+                || !TryParseSlot(f[1], protosDb, out int slot)
+                || !int.TryParse(f[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset)
                 || category < 0 || category >= CategoryCount
                 || offset < 0 || offset >= MonthsTracked
-                || !protosDb.TryGetProto(new Proto.ID(f[2]), out ProductProto product))
+                || !protosDb.TryGetProto(new Proto.ID(f[3]), out ProductProto product))
             {
                 continue;
             }
 
-            ProductHaulStats stats = GetOrAdd(m_months[category, (MonthsTracked - offset) % MonthsTracked], product);
-            stats.Fuel = Parse(f[3]);
-            stats.Maintenance = Parse(f[4]);
-            stats.Distance = Parse(f[5]);
-            stats.Deliveries = (int)Parse(f[6]);
-            stats.Delivered = Parse(f[7]);
+            ProductHaulStats stats = GetOrAdd(
+                m_months[category, slot, (MonthsTracked - offset) % MonthsTracked],
+                product);
 
-            if (f.Length == 11)
-            {
-                stats.PickupFuel = Parse(f[8]);
-                stats.PickupMaintenance = Parse(f[9]);
-                stats.PickupDistance = Parse(f[10]);
-            }
+            stats.Fuel = Parse(f[4]);
+            stats.Maintenance = Parse(f[5]);
+            stats.Distance = Parse(f[6]);
+            stats.Deliveries = (int)Parse(f[7]);
+            stats.Delivered = Parse(f[8]);
+            stats.PickupFuel = Parse(f[9]);
+            stats.PickupMaintenance = Parse(f[10]);
+            stats.PickupDistance = Parse(f[11]);
         }
+    }
+
+    private string GroupIdOf(int slot) => slot == UnknownSlot ? UnknownGroupId : m_groups[slot].Id.Value;
+
+    /// <summary>
+    /// Resolves a serialized group id back to its slot. A group that no longer exists — another mod
+    /// removed, say — lands in the catch-all rather than taking a live group's numbers with it.
+    /// </summary>
+    private bool TryParseSlot(string groupId, ProtosDb protosDb, out int slot)
+    {
+        if (groupId == UnknownGroupId)
+        {
+            slot = UnknownSlot;
+            return true;
+        }
+
+        if (protosDb.TryGetProto(new Proto.ID(groupId), out VehicleGroupProto group)
+            && m_groupSlots.TryGetValue(group, out slot))
+        {
+            return true;
+        }
+
+        slot = UnknownSlot;
+        return true;
     }
 
     private static string Num(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
@@ -413,6 +544,21 @@ public sealed class HaulStatsTracker
         return HaulCategory.General;
     }
 
+    /// <summary>
+    /// Which filter slot a truck's numbers belong in. The group aggregates a tier's fuel and
+    /// attachment variants already, so a diesel and a hydrogen haul truck land together.
+    /// </summary>
+    private int SlotFor(Truck truck)
+    {
+        VehicleGroupProto group = truck.Prototype.VehicleGroup;
+        if (group != null && m_groupSlots.TryGetValue(group, out int slot))
+        {
+            return slot;
+        }
+
+        return UnknownSlot;
+    }
+
     private void SampleTruck(Truck truck)
     {
         if (!m_truckStates.TryGetValue(truck.Id.Value, out TruckState state))
@@ -444,6 +590,8 @@ public sealed class HaulStatsTracker
             FuelProduct = truck.FuelTank.Value.Proto.Product;
         }
 
+        int slot = SlotFor(truck);
+
         Lyst<ProductQuantity> cargo = m_cargoBuffer;
         cargo.Clear();
         truck.GetCargoProducts(cargo);
@@ -469,7 +617,7 @@ public sealed class HaulStatsTracker
             {
                 // A mixed load splits the trip's cost by how much of it each product occupies.
                 double share = pq.Quantity.Value / totalQuantity;
-                ProductHaulStats stats = GetOrAdd(BucketFor(truck, pq.Product), pq.Product);
+                ProductHaulStats stats = GetOrAdd(BucketFor(truck, slot, pq.Product), pq.Product);
                 stats.Fuel += fuel * share;
                 stats.Maintenance += maintenance * share;
                 stats.Distance += distance * share;
@@ -499,18 +647,19 @@ public sealed class HaulStatsTracker
             // Empty and stationary — queue idling, refuelling, waiting. Not the cost of hauling
             // anything, so it stays out of the product rows.
             UnattributedBucket bucket = GetOrAddUnattributed(
+                slot,
                 truck.CurrentJob.ValueOrNull?.GetType().Name ?? "NoJob");
             bucket.Fuel[m_monthIndex] += fuel;
             bucket.Maintenance[m_monthIndex] += maintenance;
         }
 
-        RecordDeliveries(truck, cargo, state);
+        RecordDeliveries(truck, slot, cargo, state);
     }
 
-    private Dict<ProductProto, ProductHaulStats> BucketFor(Truck truck, ProductProto product) =>
-        m_months[(int)Classify(truck, product), m_monthIndex];
+    private Dict<ProductProto, ProductHaulStats> BucketFor(Truck truck, int slot, ProductProto product) =>
+        m_months[(int)Classify(truck, product), slot, m_monthIndex];
 
-    private void RecordDeliveries(Truck truck, Lyst<ProductQuantity> cargo, TruckState state)
+    private void RecordDeliveries(Truck truck, int slot, Lyst<ProductQuantity> cargo, TruckState state)
     {
         List<ProductProto> delivered = null;
         foreach (var entry in state.LastCargo)
@@ -536,7 +685,7 @@ public sealed class HaulStatsTracker
         {
             foreach (ProductProto product in delivered)
             {
-                ProductHaulStats stats = GetOrAdd(BucketFor(truck, product), product);
+                ProductHaulStats stats = GetOrAdd(BucketFor(truck, slot, product), product);
                 stats.Deliveries++;
                 stats.Delivered += state.LastCargo[product];
                 state.LastCargo.Remove(product);
@@ -549,12 +698,13 @@ public sealed class HaulStatsTracker
         }
     }
 
-    private UnattributedBucket GetOrAddUnattributed(string job)
+    private UnattributedBucket GetOrAddUnattributed(int slot, string job)
     {
-        if (!m_unattributed.TryGetValue(job, out UnattributedBucket bucket))
+        Dict<string, UnattributedBucket> buckets = m_unattributed[slot];
+        if (!buckets.TryGetValue(job, out UnattributedBucket bucket))
         {
             bucket = new UnattributedBucket();
-            m_unattributed.Add(job, bucket);
+            buckets.Add(job, bucket);
         }
 
         return bucket;
