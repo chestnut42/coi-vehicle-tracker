@@ -153,6 +153,8 @@ candidates for a follow-up.
 VehicleRouteStats/
   manifest.json              mod metadata
   config.json                declares the stats_state param the save persists
+  changelog.txt              per-version history; COI Hub parses and renders this
+  readme.txt                 player-facing install notes, shipped inside the zip
   VehicleRouteStats.csproj    references $(COI_ROOT) game assemblies
   VehicleRouteStatsMod.cs      IMod entry point, wires the tracker to sim/calendar events
   HaulStatsTracker.cs          per-resource fuel / maintenance / distance, bucketed by month
@@ -207,4 +209,13 @@ If it loads but misbehaves, check `%APPDATA%/Captain of Industry/Logs`.
 
 ## License
 
-[MIT](LICENSE).
+[COI-Open](LICENSE) — the Captain of Industry Open License.
+
+It lets other mod authors use, modify and share this with credit, as long as
+derivatives stay under the same license and the work is not reused outside the Captain of Industry
+ecosystem. MaFi recommend it over general-purpose licenses like MIT for mods, because MIT and
+friends can imply the author is granting rights to *everything* bundled in a mod — a problem when a
+mod carries decompiled game code or modified game assets, which remain MaFi's IP. Nothing of the
+sort is bundled here, but COI-Open is what the ecosystem expects and what COI Hub asks for at
+upload. Releases up to and including v0.3.0 were published under MIT; that grant stands for those
+copies.
