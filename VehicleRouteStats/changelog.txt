@@ -1,0 +1,25 @@
+v0.3.0 | 2026-11-20
+
+* Stats can now be filtered by vehicle class as well as by job type, with a second independent column of tickboxes: pickup trucks, trucks, haul trucks and amphibious trucks
+* Vehicle classes come from the game's own vehicle groups rather than being hardcoded, so a mod that registers its own vehicle group gets a tickbox automatically, and each class already covers its tier's diesel and hydrogen variants plus its dump, tank and flatbed attachments
+* The totals row and the Unattributed figure both follow the class filter, so the header always matches what is on screen
+* The window is no wider: the toolbar is now two rows so it stays within the card grid however many classes exist
+* Accumulated stats are reset on upgrade. Figures recorded by earlier versions carry no vehicle class and there is no honest way to assign one retroactively, so the saved history is dropped rather than guessed at
+* Raised the mod's own save-state size limit, since splitting buckets by class multiplies the worst case
+
+v0.2.0 | 2026-11-19
+
+* Fixed: the mod failed to load on Captain of Industry 0.8.8, which reworked the keybinding system and moved the truck cargo API
+* Fixed: F8 silently did nothing. A keybinding has to be added to the shortcuts registry during mod initialization or it never becomes active, with no error reported anywhere
+* The empty run out to collect a resource is now billed to that resource instead of going unattributed. It is roughly half the real cost of a round trip, so cards now show two rows: the cost of carrying a resource on top, the cost of collecting it beneath
+* Pickup cost is held until the loaded truck departs rather than released when the first crate lands, so a mixed load splits it by quantity share instead of handing all of it to whichever product loaded first
+* Requires game version 0.8.8 or newer. Players on older game versions should stay on v0.1.0
+
+v0.1.0 | 2026-09-10
+
+* Initial version: a window (default shortcut F8) showing the fuel and maintenance each resource costs to haul, one compact card per resource, sorted by fuel burned
+* Fuel and maintenance are read from the game's own model rather than estimated, and nothing accrues while the game is paused or a truck is parked
+* Dropdown to scope figures to the last 1, 3, 6 or 12 months
+* Independent toggles for general, mining and refuelling hauls, using the same categories as the vanilla truck stats tab
+* Totals row summing whatever is currently visible, with an Unattributed figure for burn that cannot be pinned to a resource
+* Stats persist across save and load, stored per save

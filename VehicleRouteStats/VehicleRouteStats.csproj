@@ -80,6 +80,9 @@
   <Target Name="DeployToModsFolder" AfterTargets="PostBuildEvent" Condition=" '$(DeployToModsFolder)' == 'true' AND '$(ProjectDir)' != '*Undefined*' ">
     <Copy SourceFiles="$(ProjectDir)\manifest.json" DestinationFolder="$(COI_MODS)\$(TargetName)\" />
     <Copy SourceFiles="$(ProjectDir)\config.json" DestinationFolder="$(COI_MODS)\$(TargetName)\" />
+    <!-- COI Hub parses changelog.txt for the mod page; readme.txt is the player-facing install note. -->
+    <Copy SourceFiles="$(ProjectDir)\changelog.txt" DestinationFolder="$(COI_MODS)\$(TargetName)\" />
+    <Copy SourceFiles="$(ProjectDir)\readme.txt" DestinationFolder="$(COI_MODS)\$(TargetName)\" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(COI_MODS)\$(TargetName)\" />
     <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(COI_MODS)\$(TargetName)\" Condition="'$(Configuration)' == 'Debug'" />
   </Target>
