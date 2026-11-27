@@ -1,3 +1,10 @@
+v0.3.1 | 2026-11-27
+
+* No functional changes -- the mod behaves exactly as v0.3.0
+* Adds this changelog and a readme.txt to the download, so the mod page can show its version history and install notes
+* Relicensed to COI-Open, the Captain of Industry Open License, which keeps derivative work inside the CoI modding ecosystem
+* Fills in the source-code link and the long description shown on the mod page
+
 v0.3.0 | 2026-11-20
 
 * Stats can now be filtered by vehicle class as well as by job type, with a second independent column of tickboxes: pickup trucks, trucks, haul trucks and amphibious trucks
